@@ -1,0 +1,47 @@
+<idea-plugin>
+    <id>oi.runner.clion</id>
+    <name>OI Runner</name>
+    <version>1.0.0</version>
+    <vendor>oi</vendor>
+
+    <description><![CDATA[
+    Runs or debugs the C/C++ file you are looking at, using CLion's own single-file build, then
+    prints wall time, CPU time and peak memory into the Run console when the process exits.
+    Release and debug builds get separate compiler options, editable under Settings | Tools | OI Runner.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+
+    <idea-version since-build="261"/>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="OI Runner" displayType="BALLOON"/>
+        <applicationService serviceImplementation="oi.runner.OiSettings"/>
+        <applicationConfigurable id="oi.runner.settings"
+                                instance="oi.runner.OiSettingsConfigurable"
+                                displayName="OI Runner"
+                                parentId="tools"/>
+    </extensions>
+
+    <actions>
+        <action id="OiRunCurrentFileRelease" class="oi.runner.OiRunReleaseAction"
+                text="OI: Run Current File (Release)"
+                description="Build the current C/C++ file with the release compiler options, run it, then report wall time, CPU time and peak memory">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+        <action id="OiRunCurrentFileDebug" class="oi.runner.OiRunDebugFlagsAction"
+                text="OI: Run Current File (Debug)"
+                description="Build the current C/C++ file with the debug compiler options and run it without the debugger, for a timing comparison">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+        <action id="OiDebugCurrentFile" class="oi.runner.OiDebugAction"
+                text="OI: Debug Current File"
+                description="Debug the current C/C++ file with the debug compiler options; wall time and exit code are reported">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
