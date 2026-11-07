@@ -1,12 +1,15 @@
 <idea-plugin>
     <id>oi.runner.clion</id>
     <name>OI Runner</name>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <vendor>oi</vendor>
 
     <description><![CDATA[
     Runs or debugs the C/C++ file you are looking at, using CLion's own single-file build, then
     prints wall time, CPU time and peak memory into the Run console when the process exits.
+    The wall time comes from the kernel's own process timestamps, so it stays accurate for programs
+    that redirect stdin/stdout with freopen and finish before the console appears, and debug sessions
+    are timed on the debuggee itself instead of the whole debugger session.
     Release and debug builds get separate compiler options, editable under Settings | Tools | OI Runner.
     ]]></description>
 
@@ -39,7 +42,7 @@
         </action>
         <action id="OiDebugCurrentFile" class="oi.runner.OiDebugAction"
                 text="OI: Debug Current File"
-                description="Debug the current C/C++ file with the debug compiler options; wall time and exit code are reported">
+                description="Debug the current C/C++ file with the debug compiler options; when the debuggee exits, wall time, CPU time and peak memory are reported for it">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
