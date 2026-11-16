@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>oi.runner.clion</id>
     <name>OI Runner</name>
-    <version>1.3.0</version>
+    <version>1.3.1</version>
     <vendor>oi</vendor>
 
     <description><![CDATA[
@@ -16,8 +16,9 @@
     input, expected output and the actual output of the last run, one tab per case, with the lines
     that do not match painted red. The plugin compiles the file once and runs it once per case with
     a time limit and a memory limit, then writes the verdict on each tab and rolls the run up as
-    "AC 3 · WA 1". Test cases can be imported from a folder of 1.in/1.out pairs, and cases are stored
-    in the project's .idea directory, so a whole problem folder can be shared as-is.
+    "AC 3 · WA 1". Test cases can be imported from a folder of 1.in/1.out pairs or from a .zip of
+    them, or simply by dragging that folder or archive onto the panel; cases are stored in the
+    project's .idea directory, so a whole problem folder can be shared as-is.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>

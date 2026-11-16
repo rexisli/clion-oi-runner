@@ -39,11 +39,19 @@ import javax.swing.Timer;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.FlowLayout;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.dnd.DnDConstants;
+import java.awt.dnd.DropTarget;
+import java.awt.dnd.DropTargetAdapter;
+import java.awt.dnd.DropTargetDragEvent;
+import java.awt.dnd.DropTargetDropEvent;
+import java.awt.dnd.DropTargetEvent;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.File;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
@@ -54,11 +62,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.Enumeration;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /**
  * The test-case panel: one tab per case, three panes each (input, expected, actual), a verdict dot
@@ -72,8 +83,10 @@ final class OiCasePanel implements Disposable {
 
     private final Project project;
     private final JPanel root = new JPanel(new BorderLayout());
+    private final JPanel headerPanel = new JPanel(new BorderLayout());
     private final JTabbedPane tabs = new JTabbedPane();
     private final JBLabel fileLabel = new JBLabel("未选择 C/C++ 文件");
+    private final JBLabel dropHint = new JBLabel("可把文件夹 / .zip 拖到这里导入");
     private final JBLabel statusLabel = new JBLabel(" ");
     private final JSpinner timeSpinner;
     private final JSpinner memorySpinner;
@@ -82,6 +95,7 @@ final class OiCasePanel implements Disposable {
     private final JButton runAllButton = new JButton("▶ 全部运行");
     private final JButton runOneButton = new JButton("▶ 运行当前");
     private final JButton importButton = new JButton("导入案例…");
+    private java.awt.dnd.DropTarget dropTarget;
     private final MessageBusConnection bus;
     private final Map<OiCase, CaseTab> tabOf = new IdentityHashMap<>();
     private Disposable tabDisposable = Disposer.newDisposable("OI Cases tabs");
@@ -95,7 +109,8 @@ final class OiCasePanel implements Disposable {
         timeSpinner = new JSpinner(new SpinnerNumberModel(store.getTimeLimitMillis(), 50, 60000, 100));
         memorySpinner = new JSpinner(new SpinnerNumberModel(store.getMemoryLimitMb(), 8, 8192, 64));
 
-        root.add(buildHeader(), BorderLayout.NORTH);
+        headerPanel.add(buildHeader(), BorderLayout.NORTH);
+        root.add(headerPanel, BorderLayout.NORTH);
         root.add(tabs, BorderLayout.CENTER);
         statusLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(2, 8, 3, 8));
         root.add(statusLabel, BorderLayout.SOUTH);
@@ -126,6 +141,9 @@ final class OiCasePanel implements Disposable {
             }
         }
         updateButtons();
+        installDropTarget(headerPanel);
+        installDropTarget(tabs);
+        installDropTarget(statusLabel);
     }
 
     JComponent getComponent() {
@@ -134,15 +152,21 @@ final class OiCasePanel implements Disposable {
 
     private JComponent buildHeader() {
         JPanel header = new JPanel(new BorderLayout());
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-        top.add(fileLabel);
+        JPanel top = new JPanel(new BorderLayout());
+        top.add(fileLabel, BorderLayout.WEST);
+        dropHint.setForeground(JBColor.GRAY);
+        dropHint.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 0, 0, 8));
+        top.add(dropHint, BorderLayout.EAST);
         header.add(top, BorderLayout.NORTH);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-        for (JButton button : new JButton[]{addButton, removeButton, runAllButton, runOneButton, importButton}) {
+        // Import sits right next to add/remove: it is the button people look for first.
+        for (JButton button : new JButton[]{addButton, removeButton, importButton, runAllButton, runOneButton}) {
             button.setFocusable(false);
             buttons.add(button);
         }
+        importButton.setToolTipText("导入文件夹里的 *.in / *.out 配对，或一个 .zip；也可以直接把文件夹 / .zip 拖到页签栏");
+        addButton.setToolTipText("添加一个空案例，自己填输入和期望输出");
         buttons.add(new JBLabel("时限"));
         timeSpinner.setFocusable(false);
         buttons.add(timeSpinner);
@@ -232,13 +256,17 @@ final class OiCasePanel implements Disposable {
     }
 
     /**
-     * Imports cases like CPH-NG does: pick a folder of 1.in/1.out pairs, or select any number of
-     * .in files inside the IDE file chooser. Each pair becomes one case named after its base name.
+     * Imports cases like CPH-NG does: pick a folder of 1.in/1.out pairs, a .zip of them, or any
+     * number of .in files inside the IDE file chooser. Each pair becomes one case named after its
+     * base name. The same entry point serves drag and drop.
      */
     private void importCases() {
-        if (file == null) return;
+        if (file == null) {
+            statusLabel.setText("先打开一个 C/C++ 文件，再导入案例");
+            return;
+        }
         JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("导入案例：选文件夹（扫描 *.in / *.out）或 .in 文件（可多选）");
+        chooser.setDialogTitle("导入案例：选文件夹或 .zip（扫描 *.in / *.out），或 .in 文件（可多选）");
         chooser.setFileSelectionMode(JFileChooser.FILES_AND_DIRECTORIES);
         chooser.setMultiSelectionEnabled(true);
         VirtualFile parent = file.getParent();
@@ -249,20 +277,80 @@ final class OiCasePanel implements Disposable {
         if (picked.length == 0 && chooser.getSelectedFile() != null) {
             picked = new File[]{chooser.getSelectedFile()};
         }
-        final File[] selected = picked;
-        final VirtualFile target = file;
+        startImport(picked);
+    }
+
+    /** Accepts folders, .zip archives and .in files dropped on the panel, from any file manager. */
+    private void installDropTarget(JComponent component) {
+        try {
+            dropTarget = new DropTarget(component, DnDConstants.ACTION_COPY_OR_MOVE, new DropTargetAdapter() {
+                @Override
+                public void dragEnter(DropTargetDragEvent event) {
+                    if (event.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                        event.acceptDrag(DnDConstants.ACTION_COPY);
+                        statusLabel.setText("松开鼠标导入案例…");
+                    } else {
+                        event.rejectDrag();
+                    }
+                }
+
+                @Override
+                public void dragExit(DropTargetEvent event) {
+                    if (!running) statusLabel.setText(" ");
+                }
+
+                @Override
+                public void drop(DropTargetDropEvent event) {
+                    if (!event.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                        event.rejectDrop();
+                        return;
+                    }
+                    try {
+                        event.acceptDrop(DnDConstants.ACTION_COPY);
+                        Object data = event.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+                        List<File> dropped = new ArrayList<>();
+                        if (data instanceof List<?>) {
+                            for (Object item : (List<?>) data) {
+                                if (item instanceof File) dropped.add((File) item);
+                            }
+                        }
+                        event.dropComplete(!dropped.isEmpty());
+                        startImport(dropped.toArray(new File[0]));
+                    } catch (Exception e) {
+                        event.dropComplete(false);
+                    }
+                }
+            }, true);
+        } catch (Exception ignored) {
+            // Headless environments (the tests) simply have no drag and drop.
+        }
+    }
+
+    /** Reads the picked folders, archives and .in files off the EDT, then adds the cases. */
+    private void startImport(File[] picked) {
+        if (picked == null || picked.length == 0) return;
+        VirtualFile target = file;
+        if (target == null) {
+            statusLabel.setText("先打开一个 C/C++ 文件，再导入案例");
+            return;
+        }
         statusLabel.setText("导入中…");
-        // Read on a pooled thread: a folder of large test files must not freeze the EDT.
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             List<OiCase> imported = new ArrayList<>();
-            for (File choice : selected) {
-                if (choice.isDirectory()) imported.addAll(casesFromFolder(choice.toPath()));
-                else if (choice.getName().toLowerCase(Locale.ROOT).endsWith(".in")) {
+            for (File choice : picked) {
+                if (imported.size() >= 200) break;
+                String lower = choice.getName().toLowerCase(Locale.ROOT);
+                if (choice.isDirectory()) {
+                    imported.addAll(casesFromFolder(choice.toPath()));
+                } else if (lower.endsWith(".zip")) {
+                    imported.addAll(casesFromZip(choice.toPath()));
+                } else if (lower.endsWith(".in")) {
                     OiCase c = caseFor(choice.toPath());
                     if (c != null) imported.add(c);
                 }
-                if (imported.size() >= 200) break;
             }
+            // A folder can overshoot the cap in one shot; keep the first 200 in natural order.
+            while (imported.size() > 200) imported.remove(imported.size() - 1);
             onEdt(() -> finishImport(target, imported));
         });
     }
@@ -270,7 +358,7 @@ final class OiCasePanel implements Disposable {
     private void finishImport(VirtualFile target, List<OiCase> imported) {
         if (file == null || !file.getPath().equals(target.getPath())) return;
         if (imported.isEmpty()) {
-            statusLabel.setText("没有找到 .in / .out 配对");
+            statusLabel.setText("没有找到 .in / .out 配对（文件夹或 .zip 里需要有 1.in 配 1.out）");
             return;
         }
         OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(target.getPath());
@@ -327,25 +415,72 @@ final class OiCasePanel implements Disposable {
         return c;
     }
 
+    /**
+     * Cases inside a .zip: every {@code X.in} pairs with {@code X.out} or {@code X.ans} in the same
+     * folder, at any depth. Entry names fall back to GBK because archives made on Chinese Windows
+     * rarely set the UTF-8 flag.
+     */
+    private static List<OiCase> casesFromZip(Path zip) {
+        List<OiCase> result = new ArrayList<>();
+        try (ZipFile archive = new ZipFile(zip.toFile(), Charset.forName("GBK"))) {
+            Map<String, byte[]> inputs = new TreeMap<>(NATURAL);
+            Map<String, byte[]> outputs = new TreeMap<>(NATURAL);
+            Enumeration<? extends ZipEntry> entries = archive.entries();
+            while (entries.hasMoreElements() && inputs.size() < 200) {
+                ZipEntry entry = entries.nextElement();
+                if (entry.isDirectory()) continue;
+                String name = entry.getName().replace('\\', '/');
+                int dot = name.lastIndexOf('.');
+                if (dot < 0) continue;
+                String extension = name.substring(dot).toLowerCase(Locale.ROOT);
+                if (!extension.equals(".in") && !extension.equals(".out") && !extension.equals(".ans")) continue;
+                if (entry.getSize() > 4L * 1024 * 1024) continue;
+                byte[] bytes;
+                try (InputStream in = archive.getInputStream(entry)) {
+                    bytes = in.readAllBytes();
+                }
+                String stem = name.substring(0, dot);
+                if (extension.equals(".in")) inputs.putIfAbsent(stem, bytes);
+                else outputs.putIfAbsent(stem, bytes);
+            }
+            for (Map.Entry<String, byte[]> entry : inputs.entrySet()) {
+                OiCase c = new OiCase();
+                String stem = entry.getKey();
+                c.name = stem.substring(stem.lastIndexOf('/') + 1);
+                c.input = decodeText(entry.getValue());
+                byte[] out = outputs.get(stem);
+                c.expected = out == null ? "" : decodeText(out);
+                result.add(c);
+                if (result.size() >= 200) break;
+            }
+        } catch (Exception ignored) {
+            // An unreadable archive behaves like an empty one; the panel then reports no pairs.
+        }
+        return result;
+    }
+
     /** UTF-8 when valid, otherwise GBK: Chinese test data is often saved in GBK. */
     private static String readText(Path path) {
         try {
             if (Files.size(path) > 4L * 1024 * 1024) return "";
-            byte[] bytes = Files.readAllBytes(path);
-            String text;
-            try {
-                text = StandardCharsets.UTF_8.newDecoder()
-                        .onMalformedInput(CodingErrorAction.REPORT)
-                        .onUnmappableCharacter(CodingErrorAction.REPORT)
-                        .decode(ByteBuffer.wrap(bytes)).toString();
-            } catch (CharacterCodingException e) {
-                text = new String(bytes, Charset.forName("GBK"));
-            }
-            if (!text.isEmpty() && text.charAt(0) == '\uFEFF') text = text.substring(1);
-            return text;
+            return decodeText(Files.readAllBytes(path));
         } catch (Exception e) {
             return "";
         }
+    }
+
+    private static String decodeText(byte[] bytes) {
+        String text;
+        try {
+            text = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes)).toString();
+        } catch (CharacterCodingException e) {
+            text = new String(bytes, Charset.forName("GBK"));
+        }
+        if (!text.isEmpty() && text.charAt(0) == '\uFEFF') text = text.substring(1);
+        return text;
     }
 
     /** 1.in, 2.in, 10.in order instead of 1, 10, 2. */
