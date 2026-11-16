@@ -292,12 +292,13 @@ final class OiCasePanel implements Disposable {
             int passed = 0;
             for (int i = 0; i < chosen.size(); i++) {
                 OiCase c = chosen.get(i);
-                OiJudge.CaseResult result = OiJudge.runCase(build, c, timeLimit, memoryLimit);
-                if (i == 0 && result.verdict == OiJudge.Verdict.TLE) {
+                OiJudge.CaseResult first = OiJudge.runCase(build, c, timeLimit, memoryLimit);
+                if (i == 0 && first.verdict == OiJudge.Verdict.TLE) {
                     // The first launch of a freshly built exe can be delayed by Defender's real-time
                     // scan (+0.15~0.35 s), which shows up as a false TLE. Confirm once before judging.
-                    result = OiJudge.runCase(build, c, timeLimit, memoryLimit);
+                    first = OiJudge.runCase(build, c, timeLimit, memoryLimit);
                 }
+                final OiJudge.CaseResult result = first;
                 int done = i + 1;
                 if (result.verdict == OiJudge.Verdict.AC) passed++;
                 int passedNow = passed;
