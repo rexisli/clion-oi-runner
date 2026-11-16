@@ -4,3 +4,5 @@ out/
 *.iml
 .DS_Store
 .tmp-test/
+.sources.txt
+.watch-install.ps1

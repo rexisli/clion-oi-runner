@@ -3,30 +3,29 @@ package oi.runner;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.editor.Document;
-import com.intellij.openapi.editor.Editor;
-import com.intellij.openapi.editor.EditorFactory;
-import com.intellij.openapi.editor.event.DocumentAdapter;
-import com.intellij.openapi.editor.event.DocumentEvent;
-import com.intellij.openapi.editor.markup.HighlighterLayer;
-import com.intellij.openapi.editor.markup.MarkupModel;
-import com.intellij.openapi.editor.markup.TextAttributes;
+import com.intellij.openapi.editor.colors.EditorColorsManager;
+import com.intellij.openapi.editor.colors.EditorColorsScheme;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
 import com.intellij.openapi.fileEditor.FileEditorManagerListener;
-import com.intellij.openapi.fileTypes.PlainTextFileType;
+import com.intellij.openapi.project.DumbService;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.ui.EditorTextField;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBScrollPane;
+import com.intellij.util.ui.JBUI;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.Icon;
 import javax.swing.ImageIcon;
+import javax.swing.ScrollPaneConstants;
 import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JFileChooser;
@@ -34,10 +33,18 @@ import javax.swing.JPanel;
 import javax.swing.JSpinner;
 import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
+import javax.swing.JTextArea;
 import javax.swing.SpinnerNumberModel;
-import javax.swing.Timer;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DefaultHighlighter;
+import javax.swing.text.Element;
+import javax.swing.text.Highlighter;
 import java.awt.BorderLayout;
+import java.awt.CardLayout;
 import java.awt.Color;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.Insets;
 import java.awt.FlowLayout;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.dnd.DnDConstants;
@@ -47,6 +54,7 @@ import java.awt.dnd.DropTargetDragEvent;
 import java.awt.dnd.DropTargetDropEvent;
 import java.awt.dnd.DropTargetEvent;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
@@ -85,16 +93,20 @@ final class OiCasePanel implements Disposable {
     private final JPanel root = new JPanel(new BorderLayout());
     private final JPanel headerPanel = new JPanel(new BorderLayout());
     private final JTabbedPane tabs = new JTabbedPane();
+    private final CardLayout centerLayout = new CardLayout();
+    private final JPanel centerPanel = new JPanel(centerLayout);
+    private final JBLabel indexingLabel = new JBLabel("正在建立索引，建好后自动载入案例", JBLabel.CENTER);
     private final JBLabel fileLabel = new JBLabel("未选择 C/C++ 文件");
-    private final JBLabel dropHint = new JBLabel("可把文件夹 / .zip 拖到这里导入");
     private final JBLabel statusLabel = new JBLabel(" ");
     private final JSpinner timeSpinner;
     private final JSpinner memorySpinner;
-    private final JButton addButton = new JButton("＋ 案例");
-    private final JButton removeButton = new JButton("－ 案例");
-    private final JButton runAllButton = new JButton("▶ 全部运行");
-    private final JButton runOneButton = new JButton("▶ 运行当前");
-    private final JButton importButton = new JButton("导入案例…");
+    // Small lettered buttons, left to right: add, remove, clear, import, run all, run one case.
+    private final JButton addButton = smallButton("+", "添加案例");
+    private final JButton removeButton = smallButton("-", "删除当前案例");
+    private final JButton clearButton = smallButton("C", "清空全部案例");
+    private final JButton importButton = smallButton("I", "导入案例，也可以直接拖进来");
+    private final JButton runAllButton = smallButton("A", "运行全部案例");
+    private final JButton runOneButton = smallButton("T", "运行当前案例");
     private java.awt.dnd.DropTarget dropTarget;
     private final MessageBusConnection bus;
     private final Map<OiCase, CaseTab> tabOf = new IdentityHashMap<>();
@@ -102,6 +114,11 @@ final class OiCasePanel implements Disposable {
 
     private VirtualFile file;
     private boolean running;
+    private boolean importing;
+    /** True once a smart-mode rebuild is queued, so indexing completion does not stack rebuilds. */
+    private boolean waitingForSmart;
+    /** While the indexer runs the panel refuses to build editors, so the buttons stay disabled. */
+    private boolean indexing;
 
     OiCasePanel(@NotNull Project project) {
         this.project = project;
@@ -111,12 +128,19 @@ final class OiCasePanel implements Disposable {
 
         headerPanel.add(buildHeader(), BorderLayout.NORTH);
         root.add(headerPanel, BorderLayout.NORTH);
-        root.add(tabs, BorderLayout.CENTER);
+        centerPanel.add(tabs, "tabs");
+        indexingLabel.setForeground(JBColor.GRAY);
+        centerPanel.add(indexingLabel, "indexing");
+        root.add(centerPanel, BorderLayout.CENTER);
         statusLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(2, 8, 3, 8));
         root.add(statusLabel, BorderLayout.SOUTH);
 
+        // One scrolling row: hundreds of cases must not wrap the strip into a wall of tabs.
+        tabs.setTabLayoutPolicy(JTabbedPane.SCROLL_TAB_LAYOUT);
+        tabs.addChangeListener(e -> activate(tabs.getSelectedIndex()));
         addButton.addActionListener(e -> addCase());
         removeButton.addActionListener(e -> removeCase());
+        clearButton.addActionListener(e -> clearCases());
         runAllButton.addActionListener(e -> run(false));
         runOneButton.addActionListener(e -> run(true));
         importButton.addActionListener(e -> importCases());
@@ -150,32 +174,46 @@ final class OiCasePanel implements Disposable {
         return root;
     }
 
+    /** One compact row: file name, the six buttons, then the two limits. No captions beyond that. */
     private JComponent buildHeader() {
         JPanel header = new JPanel(new BorderLayout());
-        JPanel top = new JPanel(new BorderLayout());
-        top.add(fileLabel, BorderLayout.WEST);
-        dropHint.setForeground(JBColor.GRAY);
-        dropHint.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 0, 0, 8));
-        top.add(dropHint, BorderLayout.EAST);
-        header.add(top, BorderLayout.NORTH);
+        fileLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 6, 0, 4));
+        header.add(fileLabel, BorderLayout.WEST);
 
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-        // Import sits right next to add/remove: it is the button people look for first.
-        for (JButton button : new JButton[]{addButton, removeButton, importButton, runAllButton, runOneButton}) {
-            button.setFocusable(false);
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 1));
+        for (JButton button : new JButton[]{addButton, removeButton, clearButton, importButton, runAllButton, runOneButton}) {
             buttons.add(button);
         }
-        importButton.setToolTipText("导入文件夹里的 *.in / *.out 配对，或一个 .zip；也可以直接把文件夹 / .zip 拖到页签栏");
-        addButton.setToolTipText("添加一个空案例，自己填输入和期望输出");
-        buttons.add(new JBLabel("时限"));
-        timeSpinner.setFocusable(false);
-        buttons.add(timeSpinner);
-        buttons.add(new JBLabel("ms  内存"));
-        memorySpinner.setFocusable(false);
-        buttons.add(memorySpinner);
-        buttons.add(new JBLabel("MB"));
         header.add(buttons, BorderLayout.CENTER);
+
+        JPanel limits = new JPanel(new FlowLayout(FlowLayout.RIGHT, 3, 1));
+        timeSpinner.setFocusable(false);
+        memorySpinner.setFocusable(false);
+        Dimension spinnerSize = new Dimension(JBUI.scale(74), JBUI.scale(22));
+        timeSpinner.setPreferredSize(spinnerSize);
+        memorySpinner.setPreferredSize(spinnerSize);
+        timeSpinner.setToolTipText("每个案例的时限，毫秒");
+        memorySpinner.setToolTipText("每个案例的内存上限，MB");
+        limits.add(new JBLabel("时限"));
+        limits.add(timeSpinner);
+        limits.add(new JBLabel("ms"));
+        limits.add(new JBLabel("内存"));
+        limits.add(memorySpinner);
+        limits.add(new JBLabel("MB"));
+        header.add(limits, BorderLayout.EAST);
         return header;
+    }
+
+    /** A button small enough for the one-row toolbar; text is a single symbol. */
+    private static JButton smallButton(String text, String tooltip) {
+        JButton button = new JButton(text);
+        button.setFocusable(false);
+        button.setMargin(new Insets(0, 0, 0, 0));
+        Dimension size = new Dimension(JBUI.scale(24), JBUI.scale(22));
+        button.setPreferredSize(size);
+        button.setMinimumSize(size);
+        button.setToolTipText(tooltip);
+        return button;
     }
 
     // ------------------------------------------------------------- file tabs
@@ -192,46 +230,107 @@ final class OiCasePanel implements Disposable {
         tabDisposable = Disposer.newDisposable("OI Cases tabs");
         tabs.removeAll();
         tabOf.clear();
-        if (file == null) return;
+        if (file == null) {
+            centerLayout.show(centerPanel, "tabs");
+            updateButtons();
+            return;
+        }
+        if (deferWhileIndexing()) return;
+        centerLayout.show(centerPanel, "tabs");
         OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(file.getPath());
         for (int i = 0; i < set.cases.size(); i++) addTab(set.cases.get(i), i);
+        activate(tabs.getSelectedIndex());
         updateButtons();
     }
 
+    /**
+     * Only the selected case keeps live editors: switching tabs builds the new one and disposes the
+     * old one, so a 200-case set costs three editors instead of six hundred.
+     */
+    private void activate(int index) {
+        if (index < 0 || index >= tabs.getTabCount()) return;
+        Component shown = tabs.getComponentAt(index);
+        for (CaseTab tab : tabOf.values()) {
+            if (tab.panel == shown) tab.ensureBuilt();
+            else if (tab.built) tab.release();
+        }
+    }
+
+    /**
+     * Building three editors per case is expensive and competes with the indexer, so while indexing
+     * runs the panel keeps the tab strip empty and shows a hint instead; one rebuild is queued for
+     * the moment the project becomes smart again.
+     */
+    private boolean deferWhileIndexing() {
+        DumbService dumb = DumbService.getInstance(project);
+        if (!dumb.isDumb()) {
+            indexing = false;
+            return false;
+        }
+        indexing = true;
+        centerLayout.show(centerPanel, "indexing");
+        updateButtons();
+        if (waitingForSmart) return true;
+        waitingForSmart = true;
+        dumb.runWhenSmart(() -> {
+            waitingForSmart = false;
+            indexing = false;
+            if (project.isDisposed()) return;
+            centerLayout.show(centerPanel, "tabs");
+            rebuildTabs();
+        });
+        return true;
+    }
+
     private void addTab(@NotNull OiCase c, int index) {
-        EditorTextField input = field(c.input, false);
-        EditorTextField expected = field(c.expected, false);
-        EditorTextField actual = field(c.actual, true);
-        input.setDisposedWith(tabDisposable);
-        expected.setDisposedWith(tabDisposable);
-        actual.setDisposedWith(tabDisposable);
-        input.getDocument().addDocumentListener(new DocumentAdapter() {
-            @Override
-            public void documentChanged(@NotNull DocumentEvent event) {
-                c.input = input.getDocument().getText();
-                OiCaseStore.getInstance(project).touch();
-            }
-        });
-        expected.getDocument().addDocumentListener(new DocumentAdapter() {
-            @Override
-            public void documentChanged(@NotNull DocumentEvent event) {
-                c.expected = expected.getDocument().getText();
-                OiCaseStore.getInstance(project).touch();
-            }
-        });
-        CaseTab tab = new CaseTab(c, input, expected, actual);
-        tabs.addTab(titleFor(c, null, index), UNKNOWN, tab.panel,
-                "输入 / 期望输出 / 实际输出");
+        // A tab costs one empty panel here; its three editors are built on first selection.
+        CaseTab tab = new CaseTab(c);
+        tabs.addTab(titleFor(c, index), UNKNOWN, tab.panel);
         tabOf.put(c, tab);
     }
 
-    private EditorTextField field(String text, boolean viewer) {
-        Document document = EditorFactory.getInstance().createDocument(text == null ? "" : text);
-        return new EditorTextField(document, project, PlainTextFileType.INSTANCE, viewer, false);
+    /**
+     * A plain swing text area instead of an IntelliJ editor: one editor per pane cost a full
+     * editor setup per case and painted stale glyphs when the text changed during a run, while a
+     * text area is cheap, never ghosts and still supports selection, copy and per-line highlighting.
+     */
+    private static JTextArea textArea(String text, boolean editable) {
+        JTextArea area = new JTextArea(normalizeSeparators(text));
+        EditorColorsScheme scheme = EditorColorsManager.getInstance().getGlobalScheme();
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, JBUI.scale(12)));
+        area.setLineWrap(false);
+        area.setWrapStyleWord(false);
+        area.setTabSize(4);
+        area.setEditable(editable);
+        area.setBorder(JBUI.Borders.empty(3, 6));
+        area.setBackground(scheme.getDefaultBackground());
+        area.setForeground(scheme.getDefaultForeground());
+        area.setCaretPosition(0);
+        return area;
+    }
+
+    /** Fires on every edit, so the model always mirrors what the panes show. */
+    private static void onEdit(JTextArea area, Runnable action) {
+        area.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override
+            public void insertUpdate(javax.swing.event.DocumentEvent event) {
+                action.run();
+            }
+
+            @Override
+            public void removeUpdate(javax.swing.event.DocumentEvent event) {
+                action.run();
+            }
+
+            @Override
+            public void changedUpdate(javax.swing.event.DocumentEvent event) {
+                action.run();
+            }
+        });
     }
 
     private void addCase() {
-        if (file == null) return;
+        if (file == null || indexing) return;
         OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(file.getPath());
         OiCase c = new OiCase();
         c.name = "案例 " + (set.cases.size() + 1);
@@ -243,16 +342,46 @@ final class OiCasePanel implements Disposable {
         updateButtons();
     }
 
+    /**
+     * Removes just the selected tab. Disposing that tab's own scope tears down its three editors,
+     * which is what made deleting slow before: rebuilding the strip re-created every other case.
+     */
     private void removeCase() {
-        if (file == null) return;
+        if (file == null || running || indexing) return;
         int index = tabs.getSelectedIndex();
         if (index < 0) return;
-        OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(file.getPath());
+        OiCaseStore store = OiCaseStore.getInstance(project);
+        OiCaseStore.CaseSet set = store.setFor(file.getPath());
         if (index >= set.cases.size()) return;
-        set.cases.remove(index);
-        OiCaseStore.getInstance(project).touch();
+        OiCase c = set.cases.remove(index);
+        CaseTab tab = tabOf.remove(c);
+        if (tab != null) {
+            tabs.remove(tab.panel);
+            tab.release();
+        }
+        store.touch();
+        statusLabel.setText("已删除 " + (c.name == null || c.name.isEmpty() ? "该案例" : c.name));
+        updateButtons();
+    }
+
+    /** Drops every case of the current file after one confirmation, in one step. */
+    private void clearCases() {
+        if (file == null || running || indexing) return;
+        OiCaseStore store = OiCaseStore.getInstance(project);
+        OiCaseStore.CaseSet set = store.setFor(file.getPath());
+        int count = set.cases.size();
+        if (count == 0) return;
+        String name = file.getName();
+        String message = count == 1
+                ? "清空 " + name + " 的这 1 个案例？删除后不能撤销。"
+                : "清空 " + name + " 的全部 " + count + " 个案例？删除后不能撤销。";
+        if (Messages.showYesNoDialog(project, message, "清空案例", Messages.getWarningIcon()) != Messages.YES) {
+            return;
+        }
+        set.cases.clear();
+        store.touch();
         rebuildTabs();
-        statusLabel.setText("已删除该案例");
+        statusLabel.setText("已清空 " + count + " 个案例");
     }
 
     /**
@@ -266,7 +395,7 @@ final class OiCasePanel implements Disposable {
             return;
         }
         JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("导入案例：选文件夹或 .zip（扫描 *.in / *.out），或 .in 文件（可多选）");
+        chooser.setDialogTitle("导入案例");
         chooser.setFileSelectionMode(JFileChooser.FILES_AND_DIRECTORIES);
         chooser.setMultiSelectionEnabled(true);
         VirtualFile parent = file.getParent();
@@ -326,39 +455,82 @@ final class OiCasePanel implements Disposable {
         }
     }
 
-    /** Reads the picked folders, archives and .in files off the EDT, then adds the cases. */
+    /**
+     * Reads the picked folders, archives and .in files as a background task, so the work shows up in
+     * the IDE's background-task list with a progress bar and a cancel button instead of silently
+     * holding the status bar on "导入中…" while a big folder or archive is read.
+     */
     private void startImport(File[] picked) {
-        if (picked == null || picked.length == 0) return;
-        VirtualFile target = file;
+        if (picked == null || picked.length == 0 || importing) return;
+        final VirtualFile target = file;
         if (target == null) {
             statusLabel.setText("先打开一个 C/C++ 文件，再导入案例");
             return;
         }
-        statusLabel.setText("导入中…");
-        ApplicationManager.getApplication().executeOnPooledThread(() -> {
-            List<OiCase> imported = new ArrayList<>();
-            for (File choice : picked) {
-                if (imported.size() >= 200) break;
-                String lower = choice.getName().toLowerCase(Locale.ROOT);
-                if (choice.isDirectory()) {
-                    imported.addAll(casesFromFolder(choice.toPath()));
-                } else if (lower.endsWith(".zip")) {
-                    imported.addAll(casesFromZip(choice.toPath()));
-                } else if (lower.endsWith(".in")) {
-                    OiCase c = caseFor(choice.toPath());
-                    if (c != null) imported.add(c);
+        final File[] choices = picked.clone();
+        final List<OiCase> imported = new ArrayList<>();
+        importing = true;
+        updateButtons();
+        new Task.Backgroundable(project, "导入 OI 案例", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                indicator.setIndeterminate(false);
+                for (int i = 0; i < choices.length; i++) {
+                    if (indicator.isCanceled()) return;
+                    File choice = choices[i];
+                    indicator.setText("读取 " + choice.getName());
+                    indicator.setFraction((double) i / Math.max(1, choices.length));
+                    String lower = choice.getName().toLowerCase(Locale.ROOT);
+                    if (choice.isDirectory()) {
+                        imported.addAll(casesFromFolder(choice.toPath()));
+                    } else if (lower.endsWith(".zip")) {
+                        imported.addAll(casesFromZip(choice.toPath()));
+                    } else if (lower.endsWith(".in")) {
+                        OiCase c = caseFor(choice.toPath());
+                        if (c != null) imported.add(c);
+                    }
+                    indicator.setText2("已读 " + imported.size() + " 个案例");
+                    // A folder can overshoot the cap in one shot; keep the first 200 in natural order.
+                    if (imported.size() >= 200) break;
+                    // Yielding lets the cancel button react on a slow folder.
+                    ProgressManager.checkCanceled();
+                }
+                while (imported.size() > 200) imported.remove(imported.size() - 1);
+                indicator.setText("整理案例…");
+                indicator.setFraction(1.0);
+            }
+
+            @Override
+            public void onSuccess() {
+                try {
+                    finishImport(target, imported);
+                } catch (Throwable t) {
+                    statusLabel.setText("导入失败：" + t);
                 }
             }
-            // A folder can overshoot the cap in one shot; keep the first 200 in natural order.
-            while (imported.size() > 200) imported.remove(imported.size() - 1);
-            onEdt(() -> finishImport(target, imported));
-        });
+
+            @Override
+            public void onCancel() {
+                statusLabel.setText("已取消导入");
+            }
+
+            @Override
+            public void onThrowable(@NotNull Throwable error) {
+                statusLabel.setText("导入失败：" + error);
+            }
+
+            @Override
+            public void onFinished() {
+                importing = false;
+                updateButtons();
+            }
+        }.queue();
     }
 
     private void finishImport(VirtualFile target, List<OiCase> imported) {
         if (file == null || !file.getPath().equals(target.getPath())) return;
         if (imported.isEmpty()) {
-            statusLabel.setText("没有找到 .in / .out 配对（文件夹或 .zip 里需要有 1.in 配 1.out）");
+            statusLabel.setText("没有找到配对的 .in / .out");
             return;
         }
         OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(target.getPath());
@@ -366,30 +538,43 @@ final class OiCasePanel implements Disposable {
         OiCaseStore.getInstance(project).touch();
         rebuildTabs();
         tabs.setSelectedIndex(set.cases.size() - imported.size());
-        statusLabel.setText("已导入 " + imported.size() + " 个案例");
+        int emptyInput = 0;
+        for (OiCase c : imported) {
+            if (c.input == null || c.input.isEmpty()) emptyInput++;
+        }
+        statusLabel.setText("已导入 " + imported.size() + " 个案例"
+                + (emptyInput > 0 ? "，" + emptyInput + " 个输入为空" : ""));
     }
 
-    /** All {@code *.in} of one folder, paired with the sibling {@code *.out} or {@code *.ans}. */
+    /**
+     * Every {@code *.in} under one folder, paired with the {@code *.out} or {@code *.ans} of the same
+     * relative path. Sub folders are walked too, because downloaded test data often keeps one folder
+     * per point, and the choice made by the file chooser may be any level above them.
+     */
     private static List<OiCase> casesFromFolder(Path dir) {
         List<OiCase> result = new ArrayList<>();
-        File[] children = dir.toFile().listFiles(File::isFile);
-        if (children == null) return result;
         Map<String, Path> inputs = new TreeMap<>(NATURAL);
         Map<String, Path> outputs = new TreeMap<>(NATURAL);
-        for (File child : children) {
-            String name = child.getName();
-            String lower = name.toLowerCase(Locale.ROOT);
-            if (lower.endsWith(".in")) {
-                inputs.putIfAbsent(name.substring(0, name.length() - 3), child.toPath());
-            } else if (lower.endsWith(".out") || lower.endsWith(".ans")) {
-                outputs.putIfAbsent(name.substring(0, name.lastIndexOf('.')), child.toPath());
-            }
+        try (java.util.stream.Stream<Path> walk = Files.walk(dir, 4)) {
+            walk.filter(Files::isRegularFile).forEach(path -> {
+                String relative = dir.relativize(path).toString().replace('\\', '/');
+                int dot = relative.lastIndexOf('.');
+                if (dot < 0) return;
+                String extension = relative.substring(dot).toLowerCase(Locale.ROOT);
+                if (!extension.equals(".in") && !extension.equals(".out") && !extension.equals(".ans")) return;
+                String stem = relative.substring(0, dot);
+                if (extension.equals(".in")) inputs.putIfAbsent(stem, path);
+                else outputs.putIfAbsent(stem, path);
+            });
+        } catch (Exception ignored) {
+            // An unreadable folder behaves like an empty one; the panel then reports no pairs.
         }
         for (Map.Entry<String, Path> entry : inputs.entrySet()) {
             OiCase c = new OiCase();
-            c.name = entry.getKey();
+            String stem = entry.getKey();
+            c.name = stem.substring(stem.lastIndexOf('/') + 1);
             c.input = readText(entry.getValue());
-            Path out = outputs.get(entry.getKey());
+            Path out = outputs.get(stem);
             c.expected = out == null ? "" : readText(out);
             result.add(c);
             if (result.size() >= 200) break;
@@ -434,7 +619,7 @@ final class OiCasePanel implements Disposable {
                 if (dot < 0) continue;
                 String extension = name.substring(dot).toLowerCase(Locale.ROOT);
                 if (!extension.equals(".in") && !extension.equals(".out") && !extension.equals(".ans")) continue;
-                if (entry.getSize() > 4L * 1024 * 1024) continue;
+                if (entry.getSize() > MAX_READ_BYTES) continue;
                 byte[] bytes;
                 try (InputStream in = archive.getInputStream(entry)) {
                     bytes = in.readAllBytes();
@@ -459,10 +644,13 @@ final class OiCasePanel implements Disposable {
         return result;
     }
 
+    /** Big inputs are legitimate (Luogu's late points run to megabytes); only absurd files are skipped. */
+    private static final long MAX_READ_BYTES = 64L * 1024 * 1024;
+
     /** UTF-8 when valid, otherwise GBK: Chinese test data is often saved in GBK. */
     private static String readText(Path path) {
         try {
-            if (Files.size(path) > 4L * 1024 * 1024) return "";
+            if (Files.size(path) > MAX_READ_BYTES) return "";
             return decodeText(Files.readAllBytes(path));
         } catch (Exception e) {
             return "";
@@ -480,7 +668,34 @@ final class OiCasePanel implements Disposable {
             text = new String(bytes, Charset.forName("GBK"));
         }
         if (!text.isEmpty() && text.charAt(0) == '\uFEFF') text = text.substring(1);
-        return text;
+        return normalizeSeparators(text);
+    }
+
+    /**
+     * IntelliJ documents accept only {@code '\n'}; a CR or CRLF reaching {@code createDocument} trips
+     * the platform assertion "Wrong line separators" and kills the whole import. Test data from
+     * Windows judges is usually CRLF, so fold it here once.
+     */
+    /** Editor panes only ever hold this much text; the model keeps the full data for judging. */
+    private static final int MAX_DISPLAY_CHARS = 120_000;
+
+    private static int textLength(String text) {
+        return text == null ? 0 : text.length();
+    }
+
+    /** The first {@code MAX_DISPLAY_CHARS} characters of {@code text}, with a note when it was cut. */
+    private static String display(String text) {
+        if (text == null) return "";
+        if (text.length() <= MAX_DISPLAY_CHARS) return text;
+        int cut = text.lastIndexOf('\n', MAX_DISPLAY_CHARS);
+        if (cut <= 0) cut = MAX_DISPLAY_CHARS;
+        return text.substring(0, cut) + "\n…… 其余 " + (text.length() - cut) + " 个字符未显示";
+    }
+
+    private static String normalizeSeparators(String text) {
+        if (text == null || text.isEmpty()) return "";
+        if (text.indexOf('\r') < 0) return text;
+        return text.replace("\r\n", "\n").replace('\r', '\n');
     }
 
     /** 1.in, 2.in, 10.in order instead of 1, 10, 2. */
@@ -516,7 +731,7 @@ final class OiCasePanel implements Disposable {
 
     private void run(boolean onlyCurrent) {
         VirtualFile target = file;
-        if (target == null || running) return;
+        if (target == null || running || indexing) return;
         OiCaseStore store = OiCaseStore.getInstance(project);
         OiCaseStore.CaseSet set = store.setFor(target.getPath());
         List<OiCase> chosen = new ArrayList<>();
@@ -526,7 +741,7 @@ final class OiCasePanel implements Disposable {
             chosen.add(set.cases.get(index));
         } else {
             if (set.cases.isEmpty()) {
-                statusLabel.setText("还没有案例，先点「＋ 案例」或导入 .in/.out");
+                statusLabel.setText("还没有案例");
                 return;
             }
             chosen.addAll(set.cases);
@@ -576,72 +791,64 @@ final class OiCasePanel implements Disposable {
     }
 
     private void apply(OiCase c, OiJudge.CaseResult result) {
-        c.actual = result.actual == null ? "" : result.actual;
+        c.actual = normalizeSeparators(result.actual);
         CaseTab tab = tabOf.get(c);
         if (tab == null) return;
-        tab.actual.setText(c.actual);
+        tab.verdict = result.verdict;
         int index = tabs.indexOfComponent(tab.panel);
         if (index >= 0) {
             tabs.setIconAt(index, iconFor(result.verdict));
-            tabs.setTitleAt(index, titleFor(c, result.verdict, index));
             tabs.setToolTipTextAt(index, tooltip(result));
         }
-        scheduleHighlight(tab);
+        if (tab.built) tab.setActual(c.actual);
     }
 
     private void markAll(OiJudge.Verdict verdict) {
-        for (Map.Entry<OiCase, CaseTab> entry : tabOf.entrySet()) {
-            int index = tabs.indexOfComponent(entry.getValue().panel);
-            if (index < 0) continue;
-            tabs.setIconAt(index, iconFor(verdict));
-            tabs.setTitleAt(index, titleFor(entry.getKey(), verdict, index));
+        for (CaseTab tab : tabOf.values()) {
+            tab.verdict = verdict;
+            int index = tabs.indexOfComponent(tab.panel);
+            if (index >= 0) tabs.setIconAt(index, iconFor(verdict));
         }
     }
 
     private void updateButtons() {
-        boolean target = file != null;
-        addButton.setEnabled(target && !running);
-        removeButton.setEnabled(target && !running && tabs.getTabCount() > 0);
-        runAllButton.setEnabled(target && !running);
-        runOneButton.setEnabled(target && !running && tabs.getTabCount() > 0);
-        importButton.setEnabled(target && !running);
+        boolean ready = file != null && !running && !indexing;
+        addButton.setEnabled(ready);
+        removeButton.setEnabled(ready && tabs.getTabCount() > 0);
+        clearButton.setEnabled(ready && tabs.getTabCount() > 0);
+        runAllButton.setEnabled(ready);
+        runOneButton.setEnabled(ready && tabs.getTabCount() > 0);
+        importButton.setEnabled(ready && !importing);
     }
 
     // ---------------------------------------------------------------- diffing
 
-    private void scheduleHighlight(CaseTab tab) {
-        attemptHighlight(tab, 0);
-    }
-
-    private void attemptHighlight(CaseTab tab, int attempt) {
-        onEdt(() -> {
-            Editor editor = tab.actual.getEditor();
-            if (editor == null) {
-                if (attempt < 40) {
-                    Timer timer = new Timer(80, e -> attemptHighlight(tab, attempt + 1));
-                    timer.setRepeats(false);
-                    timer.start();
-                }
-                return;
-            }
-            applyDiff(editor, tab.c.expected, tab.c.actual);
-        });
-    }
+    /** Mismatched lines are capped: a run of thousands of highlights costs more than it explains. */
+    private static final int MAX_DIFF_LINES = 2000;
 
     /** Paints the lines of {@code actual} that no line of {@code expected} accounts for. */
-    private static void applyDiff(Editor editor, String expected, String actual) {
-        MarkupModel model = editor.getMarkupModel();
-        model.removeAllHighlighters();
+    private static void applyDiff(JTextArea area, String expected, String actual) {
+        if (area == null) return;
+        Highlighter highlighter = area.getHighlighter();
+        highlighter.removeAllHighlights();
         List<String> left = normalizeLines(expected);
         List<String> right = normalizeLines(actual);
         boolean[] matched = lcsMatches(left, right);
         if (matched == null) return;
-        TextAttributes wrong = new TextAttributes();
-        wrong.setBackgroundColor(new JBColor(new Color(0x30E74C3C, true), new Color(0x40E74C3C, true)));
-        int limit = Math.min(right.size(), editor.getDocument().getLineCount());
-        for (int line = 0; line < limit; line++) {
-            if (line < matched.length && matched[line]) continue;
-            model.addLineHighlighter(line, HighlighterLayer.ADDITIONAL_SYNTAX, wrong);
+        Highlighter.HighlightPainter painter = new DefaultHighlighter.DefaultHighlightPainter(
+                new JBColor(new Color(0x33E74C3C, true), new Color(0x55E74C3C, true)));
+        Element root = area.getDocument().getDefaultRootElement();
+        int limit = Math.min(right.size(), root.getElementCount());
+        int painted = 0;
+        try {
+            for (int line = 0; line < limit && painted < MAX_DIFF_LINES; line++) {
+                if (line < matched.length && matched[line]) continue;
+                Element element = root.getElement(line);
+                area.getHighlighter().addHighlight(element.getStartOffset(), element.getEndOffset(), painter);
+                painted++;
+            }
+        } catch (BadLocationException ignored) {
+            // The document shrank while painting; the next run repaints anyway.
         }
     }
 
@@ -696,10 +903,36 @@ final class OiCasePanel implements Disposable {
 
     // ---------------------------------------------------------------- helpers
 
-    private static Icon iconFor(OiJudge.Verdict verdict) {
-        if (verdict == OiJudge.Verdict.AC) return PASSED;
-        if (verdict == OiJudge.Verdict.CE) return FAILED;
-        return FAILED;
+    /**
+     * Verdict icon: the coloured dot plus the short verdict, painted into one image. Text inside
+     * the icon survives the tab strip's caption clipping, which is what ate "AC" before.
+     */
+    private static Icon iconFor(@Nullable OiJudge.Verdict verdict) {
+        if (verdict == null) return UNKNOWN;
+        boolean passed = verdict == OiJudge.Verdict.AC;
+        Color color = passed ? PASS_COLOR : FAIL_COLOR;
+        String text = shortLabel(verdict);
+        Font font = new Font(Font.SANS_SERIF, Font.BOLD, JBUI.scale(10));
+        int dot = JBUI.scale(8);
+        int gap = JBUI.scale(3);
+        int pad = JBUI.scale(1);
+        BufferedImage probe = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D measure = probe.createGraphics();
+        measure.setFont(font);
+        FontMetrics metrics = measure.getFontMetrics();
+        measure.dispose();
+        int width = pad + dot + gap + metrics.stringWidth(text) + pad;
+        int height = Math.max(JBUI.scale(14), metrics.getHeight());
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = image.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setColor(color);
+        g.fillOval(pad, (height - dot) / 2, dot, dot);
+        g.setFont(font);
+        g.drawString(text, pad + dot + gap, (height - metrics.getHeight()) / 2 + metrics.getAscent());
+        g.dispose();
+        return new ImageIcon(image);
     }
 
     private static String tooltip(OiJudge.CaseResult result) {
@@ -710,13 +943,18 @@ final class OiCasePanel implements Disposable {
         return sb.toString();
     }
 
-    /** Tab caption: the case name plus the short verdict once the case has run. */
-    private static String titleFor(OiCase c, OiJudge.Verdict verdict, int index) {
+    /**
+     * Tab caption is only the case name: the verdict rides on the icon, because a caption long
+     * enough to hold both got clipped to "C1 …" while the tab kept the width of the full text.
+     */
+    private static String titleFor(OiCase c, int index) {
         String base = c.name == null ? "" : c.name.trim();
         if (base.isEmpty()) base = "案例 " + (index + 1);
-        if (base.length() > 16) base = base.substring(0, 15) + "…";
-        return verdict == null ? base : base + "   " + shortLabel(verdict);
+        return base.length() > 16 ? base.substring(0, 15) + "…" : base;
     }
+
+    private static final Color PASS_COLOR = new Color(0x27AE60);
+    private static final Color FAIL_COLOR = new Color(0xE74C3C);
 
     private static String shortLabel(OiJudge.Verdict verdict) {
         switch (verdict) {
@@ -777,36 +1015,106 @@ final class OiCasePanel implements Disposable {
         Disposer.dispose(tabDisposable);
     }
 
-    /** One case: three stacked editors with a caption each. */
-    private static final class CaseTab {
+    /** One case: an empty body until selected, then three scrolling text areas with a caption each. */
+    private final class CaseTab {
         final OiCase c;
-        final EditorTextField input;
-        final EditorTextField expected;
-        final EditorTextField actual;
-        final JPanel panel;
+        final JPanel panel = new JPanel(new BorderLayout());
+        final JPanel body = new JPanel(new BorderLayout());
+        JTextArea input;
+        JTextArea expected;
+        JTextArea actual;
+        OiJudge.Verdict verdict;
+        boolean built;
+        String expectedShown = "";
+        String actualShown = "";
 
-        CaseTab(OiCase c, EditorTextField input, EditorTextField expected, EditorTextField actual) {
+        CaseTab(OiCase c) {
             this.c = c;
-            this.input = input;
-            this.expected = expected;
-            this.actual = actual;
+            panel.add(body, BorderLayout.CENTER);
+        }
+
+        /** Builds the three panes on demand: 200 cases cost one case of widgets, not six hundred. */
+        void ensureBuilt() {
+            if (built) return;
+            built = true;
+            String inText = display(c.input);
+            boolean inCut = inText.length() < textLength(c.input);
+            String expText = display(c.expected);
+            boolean expCut = expText.length() < textLength(c.expected);
+            expectedShown = expText;
+            actualShown = display(c.actual);
+            input = textArea(inText, !inCut);
+            expected = textArea(expText, !expCut);
+            actual = textArea(actualShown, false);
+            onEdit(input, () -> {
+                c.input = input.getText();
+                OiCaseStore.getInstance(project).touch();
+            });
+            onEdit(expected, () -> {
+                c.expected = expected.getText();
+                OiCaseStore.getInstance(project).touch();
+            });
             JSplitPane upper = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
-                    pane("输入", input), pane("期望输出", expected));
+                    pane("输入" + (inCut ? " · 已截断" : ""), scrolled(input)),
+                    pane("期望输出" + (expCut ? " · 已截断" : ""), scrolled(expected)));
             upper.setResizeWeight(0.5);
-            JSplitPane all = new JSplitPane(JSplitPane.VERTICAL_SPLIT, upper, pane("实际输出", actual));
+            JSplitPane all = new JSplitPane(JSplitPane.VERTICAL_SPLIT, upper,
+                    pane("实际输出" + (actualShown.length() < textLength(c.actual) ? " · 已截断" : ""),
+                            scrolled(actual)));
             all.setResizeWeight(0.5);
             all.setBorder(null);
-            panel = new JPanel(new BorderLayout());
-            panel.add(all, BorderLayout.CENTER);
+            body.removeAll();
+            body.add(all, BorderLayout.CENTER);
+            body.revalidate();
+            body.repaint();
+            if (verdict != null) applyDiff(actual, expectedShown, actualShown);
         }
 
-        private static JComponent pane(String caption, JComponent body) {
-            JPanel p = new JPanel(new BorderLayout());
-            JBLabel label = new JBLabel(" " + caption);
-            label.setFont(label.getFont().deriveFont(Font.PLAIN));
-            p.add(label, BorderLayout.NORTH);
-            p.add(body, BorderLayout.CENTER);
-            return p;
+        /** Refreshes the read-only actual pane; large output is cut so the pane stays cheap. */
+        void setActual(String text) {
+            actualShown = display(text);
+            if (actual == null) return;
+            actual.setText(actualShown);
+            actual.setCaretPosition(0);
+            applyDiff(actual, expectedShown, actualShown);
         }
+
+        /** Frees the three panes of a tab the user left, keeping its model data. */
+        void release() {
+            if (!built) return;
+            built = false;
+            body.removeAll();
+            body.revalidate();
+            body.repaint();
+            input = null;
+            expected = null;
+            actual = null;
+            expectedShown = "";
+            actualShown = "";
+        }
+    }
+
+    /** Each pane scrolls on its own once its case text is taller than the split share. */
+    private static JBScrollPane scrolled(JComponent content) {
+        JBScrollPane scroll = new JBScrollPane(content);
+        scroll.setBorder(null);
+        // Without a modest preferred size a split pane inherits the editor's full text height and
+        // collapses its neighbours, which is what made the panes look broken after a run.
+        scroll.setPreferredSize(new Dimension(JBUI.scale(320), JBUI.scale(140)));
+        scroll.setMinimumSize(new Dimension(0, 0));
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.getHorizontalScrollBar().setUnitIncrement(16);
+        return scroll;
+    }
+
+    private static JComponent pane(String caption, JComponent body) {
+        JPanel p = new JPanel(new BorderLayout());
+        JBLabel label = new JBLabel(" " + caption);
+        label.setFont(label.getFont().deriveFont(Font.PLAIN));
+        p.add(label, BorderLayout.NORTH);
+        p.add(body, BorderLayout.CENTER);
+        return p;
     }
 }
