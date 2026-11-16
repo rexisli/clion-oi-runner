@@ -15,8 +15,9 @@ fi
 rm -rf out
 mkdir -p out
 "$JAVAC" --release 21 -encoding UTF-8 -d out -cp "$CLION_HOME/lib/*" $(find src -name '*.java')
-mkdir -p out/META-INF
+mkdir -p out/META-INF out/icons
 cp src/META-INF/plugin.xml out/META-INF/
+cp src/icons/*.svg out/icons/
 
 mkdir -p dist
 rm -f dist/oi-runner.jar

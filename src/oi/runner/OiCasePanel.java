@@ -17,7 +17,6 @@ import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.fileTypes.PlainTextFileType;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
-import com.intellij.openapi.vfs.VfsUtilCore;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.EditorTextField;
 import com.intellij.ui.JBColor;
@@ -30,6 +29,7 @@ import javax.swing.Icon;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JComponent;
+import javax.swing.JFileChooser;
 import javax.swing.JPanel;
 import javax.swing.JSpinner;
 import javax.swing.JSplitPane;
@@ -43,11 +43,22 @@ import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.io.File;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * The test-case panel: one tab per case, three panes each (input, expected, actual), a verdict dot
@@ -70,7 +81,7 @@ final class OiCasePanel implements Disposable {
     private final JButton removeButton = new JButton("－ 案例");
     private final JButton runAllButton = new JButton("▶ 全部运行");
     private final JButton runOneButton = new JButton("▶ 运行当前");
-    private final JButton importButton = new JButton("导入 .in/.out");
+    private final JButton importButton = new JButton("导入案例…");
     private final MessageBusConnection bus;
     private final Map<OiCase, CaseTab> tabOf = new IdentityHashMap<>();
     private Disposable tabDisposable = Disposer.newDisposable("OI Cases tabs");
@@ -93,7 +104,7 @@ final class OiCasePanel implements Disposable {
         removeButton.addActionListener(e -> removeCase());
         runAllButton.addActionListener(e -> run(false));
         runOneButton.addActionListener(e -> run(true));
-        importButton.addActionListener(e -> importInOut());
+        importButton.addActionListener(e -> importCases());
         timeSpinner.addChangeListener(e ->
                 OiCaseStore.getInstance(project).setTimeLimitMillis((Integer) timeSpinner.getValue()));
         memorySpinner.addChangeListener(e ->
@@ -185,7 +196,7 @@ final class OiCasePanel implements Disposable {
             }
         });
         CaseTab tab = new CaseTab(c, input, expected, actual);
-        tabs.addTab("案例 " + (index + 1), UNKNOWN, tab.panel,
+        tabs.addTab(titleFor(c, null, index), UNKNOWN, tab.panel,
                 "输入 / 期望输出 / 实际输出");
         tabOf.put(c, tab);
     }
@@ -220,37 +231,151 @@ final class OiCasePanel implements Disposable {
         statusLabel.setText("已删除该案例");
     }
 
-    private void importInOut() {
+    /**
+     * Imports cases like CPH-NG does: pick a folder of 1.in/1.out pairs, or select any number of
+     * .in files inside the IDE file chooser. Each pair becomes one case named after its base name.
+     */
+    private void importCases() {
         if (file == null) return;
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("导入案例：选文件夹（扫描 *.in / *.out）或 .in 文件（可多选）");
+        chooser.setFileSelectionMode(JFileChooser.FILES_AND_DIRECTORIES);
+        chooser.setMultiSelectionEnabled(true);
         VirtualFile parent = file.getParent();
-        if (parent == null) return;
-        String stem = file.getNameWithoutExtension();
-        VirtualFile in = parent.findChild(stem + ".in");
-        VirtualFile out = parent.findChild(stem + ".out");
-        if (in == null && out == null) {
-            statusLabel.setText("同目录下没找到 " + stem + ".in / " + stem + ".out");
-            return;
+        if (parent != null) chooser.setCurrentDirectory(new File(parent.getPath()));
+
+        if (chooser.showOpenDialog(root) != JFileChooser.APPROVE_OPTION) return;
+        File[] picked = chooser.getSelectedFiles();
+        if (picked.length == 0 && chooser.getSelectedFile() != null) {
+            picked = new File[]{chooser.getSelectedFile()};
         }
-        OiCase c = new OiCase();
-        c.name = stem;
-        c.input = readFile(in);
-        c.expected = readFile(out);
-        OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(file.getPath());
-        set.cases.add(c);
-        OiCaseStore.getInstance(project).touch();
-        addTab(c, set.cases.size() - 1);
-        tabs.setSelectedIndex(set.cases.size() - 1);
-        statusLabel.setText("已从 " + stem + ".in / .out 导入案例");
+        final File[] selected = picked;
+        final VirtualFile target = file;
+        statusLabel.setText("导入中…");
+        // Read on a pooled thread: a folder of large test files must not freeze the EDT.
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            List<OiCase> imported = new ArrayList<>();
+            for (File choice : selected) {
+                if (choice.isDirectory()) imported.addAll(casesFromFolder(choice.toPath()));
+                else if (choice.getName().toLowerCase(Locale.ROOT).endsWith(".in")) {
+                    OiCase c = caseFor(choice.toPath());
+                    if (c != null) imported.add(c);
+                }
+                if (imported.size() >= 200) break;
+            }
+            onEdt(() -> finishImport(target, imported));
+        });
     }
 
-    private static String readFile(VirtualFile file) {
-        if (file == null) return "";
+    private void finishImport(VirtualFile target, List<OiCase> imported) {
+        if (file == null || !file.getPath().equals(target.getPath())) return;
+        if (imported.isEmpty()) {
+            statusLabel.setText("没有找到 .in / .out 配对");
+            return;
+        }
+        OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(target.getPath());
+        set.cases.addAll(imported);
+        OiCaseStore.getInstance(project).touch();
+        rebuildTabs();
+        tabs.setSelectedIndex(set.cases.size() - imported.size());
+        statusLabel.setText("已导入 " + imported.size() + " 个案例");
+    }
+
+    /** All {@code *.in} of one folder, paired with the sibling {@code *.out} or {@code *.ans}. */
+    private static List<OiCase> casesFromFolder(Path dir) {
+        List<OiCase> result = new ArrayList<>();
+        File[] children = dir.toFile().listFiles(File::isFile);
+        if (children == null) return result;
+        Map<String, Path> inputs = new TreeMap<>(NATURAL);
+        Map<String, Path> outputs = new TreeMap<>(NATURAL);
+        for (File child : children) {
+            String name = child.getName();
+            String lower = name.toLowerCase(Locale.ROOT);
+            if (lower.endsWith(".in")) {
+                inputs.putIfAbsent(name.substring(0, name.length() - 3), child.toPath());
+            } else if (lower.endsWith(".out") || lower.endsWith(".ans")) {
+                outputs.putIfAbsent(name.substring(0, name.lastIndexOf('.')), child.toPath());
+            }
+        }
+        for (Map.Entry<String, Path> entry : inputs.entrySet()) {
+            OiCase c = new OiCase();
+            c.name = entry.getKey();
+            c.input = readText(entry.getValue());
+            Path out = outputs.get(entry.getKey());
+            c.expected = out == null ? "" : readText(out);
+            result.add(c);
+            if (result.size() >= 200) break;
+        }
+        return result;
+    }
+
+    /** One .in file and its sibling .out/.ans, used when the user selects files directly. */
+    private static OiCase caseFor(Path in) {
+        String name = in.getFileName().toString();
+        String stem = name.substring(0, name.length() - 3);
+        OiCase c = new OiCase();
+        c.name = stem;
+        c.input = readText(in);
+        Path dir = in.getParent();
+        for (String extension : new String[]{".out", ".ans"}) {
+            Path out = dir.resolve(stem + extension);
+            if (Files.isRegularFile(out)) {
+                c.expected = readText(out);
+                break;
+            }
+        }
+        return c;
+    }
+
+    /** UTF-8 when valid, otherwise GBK: Chinese test data is often saved in GBK. */
+    private static String readText(Path path) {
         try {
-            return VfsUtilCore.loadText(file);
+            if (Files.size(path) > 4L * 1024 * 1024) return "";
+            byte[] bytes = Files.readAllBytes(path);
+            String text;
+            try {
+                text = StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(bytes)).toString();
+            } catch (CharacterCodingException e) {
+                text = new String(bytes, Charset.forName("GBK"));
+            }
+            if (!text.isEmpty() && text.charAt(0) == '\uFEFF') text = text.substring(1);
+            return text;
         } catch (Exception e) {
             return "";
         }
     }
+
+    /** 1.in, 2.in, 10.in order instead of 1, 10, 2. */
+    private static int naturalCompare(String left, String right) {
+        int i = 0;
+        int j = 0;
+        while (i < left.length() && j < right.length()) {
+            char a = left.charAt(i);
+            char b = right.charAt(j);
+            if (Character.isDigit(a) && Character.isDigit(b)) {
+                int startA = i;
+                int startB = j;
+                while (i < left.length() && Character.isDigit(left.charAt(i))) i++;
+                while (j < right.length() && Character.isDigit(right.charAt(j))) j++;
+                String numberA = left.substring(startA, i).replaceFirst("^0+(?=.)", "");
+                String numberB = right.substring(startB, j).replaceFirst("^0+(?=.)", "");
+                if (numberA.length() != numberB.length()) return numberA.length() - numberB.length();
+                int cmp = numberA.compareTo(numberB);
+                if (cmp != 0) return cmp;
+            } else {
+                int cmp = Character.compare(Character.toLowerCase(a), Character.toLowerCase(b));
+                if (cmp != 0) return cmp;
+                i++;
+                j++;
+            }
+        }
+        return (left.length() - i) - (right.length() - j);
+    }
+
+    private static final Comparator<String> NATURAL = OiCasePanel::naturalCompare;
 
     // --------------------------------------------------------------- running
 
@@ -289,7 +414,7 @@ final class OiCasePanel implements Disposable {
                 });
                 return;
             }
-            int passed = 0;
+            Map<OiJudge.Verdict, Integer> tally = new EnumMap<>(OiJudge.Verdict.class);
             for (int i = 0; i < chosen.size(); i++) {
                 OiCase c = chosen.get(i);
                 OiJudge.CaseResult first = OiJudge.runCase(build, c, timeLimit, memoryLimit);
@@ -300,18 +425,16 @@ final class OiCasePanel implements Disposable {
                 }
                 final OiJudge.CaseResult result = first;
                 int done = i + 1;
-                if (result.verdict == OiJudge.Verdict.AC) passed++;
-                int passedNow = passed;
+                tally.merge(result.verdict, 1, Integer::sum);
                 onEdt(() -> {
                     apply(c, result);
-                    statusLabel.setText("运行中… " + done + "/" + chosen.size() + "，通过 " + passedNow);
+                    statusLabel.setText("运行中… " + done + "/" + chosen.size() + " · " + summary(tally));
                 });
             }
-            int total = passed;
             onEdt(() -> {
                 running = false;
                 updateButtons();
-                statusLabel.setText(total + "/" + chosen.size() + " 通过 · 编译 "
+                statusLabel.setText(summary(tally) + " · 共 " + chosen.size() + " 个案例 · 编译 "
                         + String.format(Locale.ROOT, "%.2f", build.seconds) + " s");
             });
         });
@@ -325,14 +448,18 @@ final class OiCasePanel implements Disposable {
         int index = tabs.indexOfComponent(tab.panel);
         if (index >= 0) {
             tabs.setIconAt(index, iconFor(result.verdict));
+            tabs.setTitleAt(index, titleFor(c, result.verdict, index));
             tabs.setToolTipTextAt(index, tooltip(result));
         }
         scheduleHighlight(tab);
     }
 
     private void markAll(OiJudge.Verdict verdict) {
-        for (int i = 0; i < tabs.getTabCount(); i++) {
-            tabs.setIconAt(i, iconFor(verdict));
+        for (Map.Entry<OiCase, CaseTab> entry : tabOf.entrySet()) {
+            int index = tabs.indexOfComponent(entry.getValue().panel);
+            if (index < 0) continue;
+            tabs.setIconAt(index, iconFor(verdict));
+            tabs.setTitleAt(index, titleFor(entry.getKey(), verdict, index));
         }
     }
 
@@ -445,6 +572,42 @@ final class OiCasePanel implements Disposable {
         if (result.wallSeconds >= 0) sb.append(" · ").append(String.format(Locale.ROOT, "%.3f s", result.wallSeconds));
         if (result.cpuMillis >= 0) sb.append(" · CPU ").append(String.format(Locale.ROOT, "%.0f ms", result.cpuMillis));
         if (result.peakBytes >= 0) sb.append(" · 内存 ").append(Oi.humanBytes(result.peakBytes));
+        return sb.toString();
+    }
+
+    /** Tab caption: the case name plus the short verdict once the case has run. */
+    private static String titleFor(OiCase c, OiJudge.Verdict verdict, int index) {
+        String base = c.name == null ? "" : c.name.trim();
+        if (base.isEmpty()) base = "案例 " + (index + 1);
+        if (base.length() > 16) base = base.substring(0, 15) + "…";
+        return verdict == null ? base : base + "   " + shortLabel(verdict);
+    }
+
+    private static String shortLabel(OiJudge.Verdict verdict) {
+        switch (verdict) {
+            case AC: return "AC";
+            case WA: return "WA";
+            case TLE: return "TLE";
+            case MLE: return "MLE";
+            case CE: return "CE";
+            default: return "RE";
+        }
+    }
+
+    /** "AC 3 · WA 1" style roll-up for the status bar. */
+    private static String summary(Map<OiJudge.Verdict, Integer> tally) {
+        int total = 0;
+        for (int count : tally.values()) total += count;
+        if (total == 0) return "还没有结果";
+        int passed = tally.getOrDefault(OiJudge.Verdict.AC, 0);
+        StringBuilder sb = new StringBuilder("AC ").append(passed);
+        for (OiJudge.Verdict verdict : new OiJudge.Verdict[]{
+                OiJudge.Verdict.WA, OiJudge.Verdict.TLE, OiJudge.Verdict.MLE,
+                OiJudge.Verdict.RE, OiJudge.Verdict.CE}) {
+            int count = tally.getOrDefault(verdict, 0);
+            if (count > 0) sb.append(" · ").append(shortLabel(verdict)).append(' ').append(count);
+        }
+        if (passed == total) sb.append(" · 全部通过");
         return sb.toString();
     }
 
