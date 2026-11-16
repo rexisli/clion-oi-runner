@@ -1,6 +1,7 @@
 package oi.runner;
 
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
@@ -72,6 +73,7 @@ final class OiCasePanel implements Disposable {
     private final JButton importButton = new JButton("导入 .in/.out");
     private final MessageBusConnection bus;
     private final Map<OiCase, CaseTab> tabOf = new IdentityHashMap<>();
+    private Disposable tabDisposable = Disposer.newDisposable("OI Cases tabs");
 
     private VirtualFile file;
     private boolean running;
@@ -151,6 +153,8 @@ final class OiCasePanel implements Disposable {
     }
 
     private void rebuildTabs() {
+        Disposer.dispose(tabDisposable);
+        tabDisposable = Disposer.newDisposable("OI Cases tabs");
         tabs.removeAll();
         tabOf.clear();
         if (file == null) return;
@@ -163,6 +167,9 @@ final class OiCasePanel implements Disposable {
         EditorTextField input = field(c.input, false);
         EditorTextField expected = field(c.expected, false);
         EditorTextField actual = field(c.actual, true);
+        input.setDisposedWith(tabDisposable);
+        expected.setDisposedWith(tabDisposable);
+        actual.setDisposedWith(tabDisposable);
         input.getDocument().addDocumentListener(new DocumentAdapter() {
             @Override
             public void documentChanged(@NotNull DocumentEvent event) {
@@ -286,6 +293,11 @@ final class OiCasePanel implements Disposable {
             for (int i = 0; i < chosen.size(); i++) {
                 OiCase c = chosen.get(i);
                 OiJudge.CaseResult result = OiJudge.runCase(build, c, timeLimit, memoryLimit);
+                if (i == 0 && result.verdict == OiJudge.Verdict.TLE) {
+                    // The first launch of a freshly built exe can be delayed by Defender's real-time
+                    // scan (+0.15~0.35 s), which shows up as a false TLE. Confirm once before judging.
+                    result = OiJudge.runCase(build, c, timeLimit, memoryLimit);
+                }
                 int done = i + 1;
                 if (result.verdict == OiJudge.Verdict.AC) passed++;
                 int passedNow = passed;
@@ -463,6 +475,7 @@ final class OiCasePanel implements Disposable {
     @Override
     public void dispose() {
         bus.disconnect();
+        Disposer.dispose(tabDisposable);
     }
 
     /** One case: three stacked editors with a caption each. */

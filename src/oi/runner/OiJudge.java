@@ -67,7 +67,7 @@ final class OiJudge {
             Process p = pb.start();
             String output;
             try (InputStream in = p.getInputStream()) {
-                output = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                output = decode(in.readAllBytes());
             }
             if (!p.waitFor(300, TimeUnit.SECONDS)) {
                 killTree(p);
@@ -207,10 +207,20 @@ final class OiJudge {
     private static String readText(Path file) {
         try {
             if (!Files.isRegularFile(file)) return "";
-            byte[] bytes = Files.readAllBytes(file);
-            return new String(bytes, StandardCharsets.UTF_8);
+            return decode(Files.readAllBytes(file));
         } catch (Throwable t) {
             return "";
+        }
+    }
+
+    /** UTF-8 first; if the bytes are not valid UTF-8 (MinGW on a Chinese Windows prints GBK), decode as GBK. */
+    private static String decode(byte[] bytes) {
+        String utf8 = new String(bytes, StandardCharsets.UTF_8);
+        if (utf8.indexOf('\uFFFD') < 0) return utf8;
+        try {
+            return new String(bytes, java.nio.charset.Charset.forName("GBK"));
+        } catch (Throwable ignored) {
+            return utf8;
         }
     }
 
