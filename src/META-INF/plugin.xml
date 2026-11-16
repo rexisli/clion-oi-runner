@@ -35,7 +35,6 @@
         <toolWindow id="OI Cases"
                     anchor="right"
                     secondary="false"
-                    icon="AllIcons.Toolwindows.ToolWindowRun"
                     factoryClass="oi.runner.OiCasePanelFactory"/>
     </extensions>
 
