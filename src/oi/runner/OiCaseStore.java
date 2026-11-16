@@ -1,6 +1,6 @@
 package oi.runner;
 
-import com.intellij.openapi.components.PersistentStateComponent;
+import com.intellij.openapi.components.PersistentStateComponentWithModificationTracker;
 import com.intellij.openapi.components.State;
 import com.intellij.openapi.components.Storage;
 import com.intellij.openapi.project.Project;
@@ -11,13 +11,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Project-level store, written to .idea/oi-runner.xml: for every source file, its list of test
  * cases, plus the judge limits. Nothing is hand-written; the panel edits this state directly.
  */
 @State(name = "OiRunnerCases", storages = @Storage("oi-runner.xml"))
-public final class OiCaseStore implements PersistentStateComponent<OiCaseStore.State> {
+public final class OiCaseStore implements PersistentStateComponentWithModificationTracker<OiCaseStore.State> {
 
     /** The cases of one source file. */
     public static final class CaseSet {
@@ -32,6 +33,19 @@ public final class OiCaseStore implements PersistentStateComponent<OiCaseStore.S
     }
 
     private State state = new State();
+
+    /** Bumped on every edit so the platform saves the project file while the user types. */
+    private final AtomicLong modifications = new AtomicLong();
+
+    /** Marks the case set as changed; also used by the panel after editing a case. */
+    public void touch() {
+        modifications.incrementAndGet();
+    }
+
+    @Override
+    public long getStateModificationCount() {
+        return modifications.get();
+    }
 
     public static OiCaseStore getInstance(@NotNull Project project) {
         return project.getService(OiCaseStore.class);
@@ -67,6 +81,7 @@ public final class OiCaseStore implements PersistentStateComponent<OiCaseStore.S
 
     public void setTimeLimitMillis(int value) {
         state.timeLimitMillis = Math.max(50, value);
+        touch();
     }
 
     public int getMemoryLimitMb() {
@@ -75,6 +90,7 @@ public final class OiCaseStore implements PersistentStateComponent<OiCaseStore.S
 
     public void setMemoryLimitMb(int value) {
         state.memoryLimitMb = Math.max(8, value);
+        touch();
     }
 
     static String normalize(String path) {

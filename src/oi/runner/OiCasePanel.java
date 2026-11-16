@@ -167,12 +167,14 @@ final class OiCasePanel implements Disposable {
             @Override
             public void documentChanged(@NotNull DocumentEvent event) {
                 c.input = input.getDocument().getText();
+                OiCaseStore.getInstance(project).touch();
             }
         });
         expected.getDocument().addDocumentListener(new DocumentAdapter() {
             @Override
             public void documentChanged(@NotNull DocumentEvent event) {
                 c.expected = expected.getDocument().getText();
+                OiCaseStore.getInstance(project).touch();
             }
         });
         CaseTab tab = new CaseTab(c, input, expected, actual);
@@ -192,6 +194,7 @@ final class OiCasePanel implements Disposable {
         OiCase c = new OiCase();
         c.name = "案例 " + (set.cases.size() + 1);
         set.cases.add(c);
+        OiCaseStore.getInstance(project).touch();
         addTab(c, set.cases.size() - 1);
         tabs.setSelectedIndex(set.cases.size() - 1);
         statusLabel.setText("已添加 " + c.name);
@@ -205,6 +208,7 @@ final class OiCasePanel implements Disposable {
         OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(file.getPath());
         if (index >= set.cases.size()) return;
         set.cases.remove(index);
+        OiCaseStore.getInstance(project).touch();
         rebuildTabs();
         statusLabel.setText("已删除该案例");
     }
@@ -226,6 +230,7 @@ final class OiCasePanel implements Disposable {
         c.expected = readFile(out);
         OiCaseStore.CaseSet set = OiCaseStore.getInstance(project).setFor(file.getPath());
         set.cases.add(c);
+        OiCaseStore.getInstance(project).touch();
         addTab(c, set.cases.size() - 1);
         tabs.setSelectedIndex(set.cases.size() - 1);
         statusLabel.setText("已从 " + stem + ".in / .out 导入案例");
