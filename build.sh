@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-CLION_HOME="${CLION_HOME:-D:/CLion 2026.1.1}"
+CLION_HOME="${CLION_HOME:-D:/CLion}"
 JAVAC="${JAVAC:-javac}"
 JAR="${JAR:-jar}"
 

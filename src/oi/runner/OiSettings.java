@@ -8,9 +8,9 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Application-wide compiler options, kept in two separate sets: one for release builds,
- * one for debug builds. CLion's single-file run configuration has a single compiler-options
- * field, so splitting the two is exactly what this plugin adds.
+ * Application-wide compiler options, kept in three separate sets: one for release builds, one for
+ * debug builds, and one for the test-case judge. CLion's single-file run configuration has a single
+ * compiler-options field, so splitting the sets is exactly what this plugin adds.
  */
 @State(name = "OiRunnerSettings", storages = @Storage("oi-runner.xml"))
 public final class OiSettings implements PersistentStateComponent<OiSettings.State> {
@@ -19,11 +19,16 @@ public final class OiSettings implements PersistentStateComponent<OiSettings.Sta
     public static final String DEFAULT_RELEASE = "-O2 -DNDEBUG";
     /** Symbols, no optimisation: what you want for stepping and for comparing against release. */
     public static final String DEFAULT_DEBUG = "-O0 -g";
+    /** What the test-case panel compiles with: optimisation on, C++17 by default. */
+    public static final String DEFAULT_JUDGE = "-O2 -DNDEBUG -std=gnu++17";
 
     /** Persisted payload. */
     public static final class State {
         public String releaseOptions = DEFAULT_RELEASE;
         public String debugOptions = DEFAULT_DEBUG;
+        public String judgeOptions = DEFAULT_JUDGE;
+        /** Compiler used by the test-case panel; empty means "the one shipped with CLion". */
+        public String compilerPath = "";
     }
 
     private State state = new State();
@@ -57,6 +62,22 @@ public final class OiSettings implements PersistentStateComponent<OiSettings.Sta
 
     public void setDebugOptions(String value) {
         state.debugOptions = value == null ? "" : value.trim();
+    }
+
+    public String getJudgeOptions() {
+        return state.judgeOptions == null ? DEFAULT_JUDGE : state.judgeOptions.trim();
+    }
+
+    public void setJudgeOptions(String value) {
+        state.judgeOptions = value == null ? "" : value.trim();
+    }
+
+    public String getCompilerPath() {
+        return state.compilerPath == null ? "" : state.compilerPath.trim();
+    }
+
+    public void setCompilerPath(String value) {
+        state.compilerPath = value == null ? "" : value.trim();
     }
 
     public void resetToDefaults() {

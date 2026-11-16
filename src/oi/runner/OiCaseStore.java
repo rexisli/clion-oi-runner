@@ -1,0 +1,83 @@
+package oi.runner;
+
+import com.intellij.openapi.components.PersistentStateComponent;
+import com.intellij.openapi.components.State;
+import com.intellij.openapi.components.Storage;
+import com.intellij.openapi.project.Project;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Project-level store, written to .idea/oi-runner.xml: for every source file, its list of test
+ * cases, plus the judge limits. Nothing is hand-written; the panel edits this state directly.
+ */
+@State(name = "OiRunnerCases", storages = @Storage("oi-runner.xml"))
+public final class OiCaseStore implements PersistentStateComponent<OiCaseStore.State> {
+
+    /** The cases of one source file. */
+    public static final class CaseSet {
+        public List<OiCase> cases = new ArrayList<>();
+    }
+
+    /** Persisted payload. */
+    public static final class State {
+        public Map<String, CaseSet> sets = new LinkedHashMap<>();
+        public int timeLimitMillis = 1000;
+        public int memoryLimitMb = 256;
+    }
+
+    private State state = new State();
+
+    public static OiCaseStore getInstance(@NotNull Project project) {
+        return project.getService(OiCaseStore.class);
+    }
+
+    @Override
+    public @Nullable State getState() {
+        return state;
+    }
+
+    @Override
+    public void loadState(@NotNull State state) {
+        this.state = state == null ? new State() : state;
+        if (this.state.sets == null) this.state.sets = new LinkedHashMap<>();
+        if (this.state.timeLimitMillis <= 0) this.state.timeLimitMillis = 1000;
+        if (this.state.memoryLimitMb <= 0) this.state.memoryLimitMb = 256;
+    }
+
+    public CaseSet setFor(String path) {
+        String key = normalize(path);
+        CaseSet set = state.sets.get(key);
+        if (set == null) {
+            set = new CaseSet();
+            state.sets.put(key, set);
+        }
+        if (set.cases == null) set.cases = new ArrayList<>();
+        return set;
+    }
+
+    public int getTimeLimitMillis() {
+        return state.timeLimitMillis;
+    }
+
+    public void setTimeLimitMillis(int value) {
+        state.timeLimitMillis = Math.max(50, value);
+    }
+
+    public int getMemoryLimitMb() {
+        return state.memoryLimitMb;
+    }
+
+    public void setMemoryLimitMb(int value) {
+        state.memoryLimitMb = Math.max(8, value);
+    }
+
+    static String normalize(String path) {
+        return path == null ? "" : path.replace('\\', '/');
+    }
+}

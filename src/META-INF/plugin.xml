@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>oi.runner.clion</id>
     <name>OI Runner</name>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
     <vendor>oi</vendor>
 
     <description><![CDATA[
@@ -11,6 +11,12 @@
     that redirect stdin/stdout with freopen and finish before the console appears, and debug sessions
     are timed on the debuggee itself instead of the whole debugger session.
     Release and debug builds get separate compiler options, editable under Settings | Tools | OI Runner.
+    <br/><br/>
+    The <b>OI Cases</b> tool window keeps a list of test cases for the file you are looking at:
+    input, expected output and the actual output of the last run, one tab per case, with the lines
+    that do not match painted red. The plugin compiles the file once and runs it once per case with
+    a time limit and a memory limit, then shows how many cases passed. Cases are stored in the
+    project's .idea directory, so a whole problem folder can be shared as-is.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -21,10 +27,16 @@
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup id="OI Runner" displayType="BALLOON"/>
         <applicationService serviceImplementation="oi.runner.OiSettings"/>
+        <projectService serviceImplementation="oi.runner.OiCaseStore"/>
         <applicationConfigurable id="oi.runner.settings"
                                 instance="oi.runner.OiSettingsConfigurable"
                                 displayName="OI Runner"
                                 parentId="tools"/>
+        <toolWindow id="OI Cases"
+                    anchor="right"
+                    secondary="false"
+                    icon="AllIcons.Toolwindows.ToolWindowRun"
+                    factoryClass="oi.runner.OiCasePanelFactory"/>
     </extensions>
 
     <actions>
@@ -43,6 +55,12 @@
         <action id="OiDebugCurrentFile" class="oi.runner.OiDebugAction"
                 text="OI: Debug Current File"
                 description="Debug the current C/C++ file with the debug compiler options; when the debuggee exits, wall time, CPU time and peak memory are reported for it">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+        <action id="OiOpenCases" class="oi.runner.OiCaseAction"
+                text="OI: Test Cases"
+                description="Open the OI Cases tool window for the file you are looking at">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>

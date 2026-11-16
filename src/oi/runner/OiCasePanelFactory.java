@@ -1,0 +1,20 @@
+package oi.runner;
+
+import com.intellij.openapi.project.Project;
+import com.intellij.openapi.wm.ToolWindow;
+import com.intellij.openapi.wm.ToolWindowFactory;
+import com.intellij.ui.content.Content;
+import com.intellij.ui.content.ContentFactory;
+import org.jetbrains.annotations.NotNull;
+
+/** Creates the "OI Cases" tool window. */
+public final class OiCasePanelFactory implements ToolWindowFactory {
+
+    @Override
+    public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
+        OiCasePanel panel = new OiCasePanel(project);
+        Content content = ContentFactory.getInstance().createContent(panel.getComponent(), "", false);
+        content.setDisposer(panel);
+        toolWindow.getContentManager().addContent(content);
+    }
+}

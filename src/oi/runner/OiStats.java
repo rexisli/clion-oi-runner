@@ -130,6 +130,8 @@ final class OiStats {
         boolean GetExitCodeProcess(Pointer handle, IntByReference exitCode);
 
         boolean CloseHandle(Pointer handle);
+
+        void GetSystemTimeAsFileTime(FILETIME time);
     }
 
     public interface Psapi extends Library {
@@ -173,6 +175,45 @@ final class OiStats {
         } catch (Throwable t) {
             LOG.warn("OI Runner: OpenProcess failed for pid " + pid, t);
             return null;
+        }
+    }
+
+    /**
+     * Opens the process that is starting right now. The kernel may still be setting up the image
+     * name and access rights for a moment after the IDE has handed out its pid, so this retries
+     * instead of settling for the slow event window.
+     */
+    private static Pointer openFresh(int pid) {
+        Kernel32 k = kernel32();
+        if (k == null || pid <= 0) return null;
+        for (int attempt = 0; attempt < 25; attempt++) {
+            try {
+                Pointer handle = k.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid);
+                if (handle == null) handle = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (handle != null) return handle;
+            } catch (Throwable t) {
+                LOG.warn("OI Runner: OpenProcess failed for pid " + pid, t);
+                return null;
+            }
+            try {
+                Thread.sleep(4L);
+            } catch (InterruptedException e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /** The system clock in 100 ns ticks, the same unit as the kernel's process timestamps. */
+    private static long systemTime() {
+        Kernel32 k = kernel32();
+        if (k == null) return 0;
+        try {
+            FILETIME now = new FILETIME();
+            k.GetSystemTimeAsFileTime(now);
+            return now.quad();
+        } catch (Throwable t) {
+            return 0;
         }
     }
 
@@ -241,6 +282,8 @@ final class OiStats {
         double cpuMillis = -1;
         long peakBytes = -1;
         boolean kernelTimed;
+        /** Wall time was the distance from the process' creation to now: no exit timestamp. */
+        boolean creationTimed;
     }
 
     private static final class Listener implements ExecutionListener {
@@ -261,7 +304,7 @@ final class OiStats {
             Executor executor = ExecutorRegistry.getInstance().getExecutorById(executorId);
             boolean debug = DefaultDebugExecutor.EXECUTOR_ID.equals(executorId);
             Project project = env == null ? null : env.getProject();
-            String exeName = WINDOWS ? baseName(exePathOf(env)) : null;
+            String exeName = WINDOWS ? exeNameOf(env) : null;
 
             Capture c = new Capture(handler, pidOf(handler), started == null ? now : started,
                     project, executor, debug, exeName);
@@ -270,15 +313,14 @@ final class OiStats {
             if (!WINDOWS || project == null) return;
 
             if (isProgramItself(c.handlerPid, exeName, debug)) {
-                Pointer handle = open(c.handlerPid);
+                Pointer handle = openFresh(c.handlerPid);
                 if (handle != null) {
                     c.pid = c.handlerPid;
                     c.handle = handle;
                     c.creation = creationTime(handle);
                     return;
                 }
-                LOG.info("OI Runner: pid " + c.handlerPid + " is already gone, timing falls back to event window");
-                return;
+                LOG.info("OI Runner: pid " + c.handlerPid + " could not be opened, looking for the program by name");
             }
             // Debug session, or the handler wraps the program in something else: find the real
             // program while it is starting.
@@ -456,9 +498,20 @@ final class OiStats {
             }
         }
 
+        if (s.wallSeconds < 0 && c.creation > 0) {
+            // The exit timestamp could not be read, but the creation timestamp could: measure from
+            // then. This still excludes the build the IDE ran before starting the program.
+            long now = systemTime();
+            if (now > c.creation) {
+                s.wallSeconds = (now - c.creation) / 1e7;
+                s.kernelTimed = false;
+                s.creationTimed = true;
+            }
+        }
+
         if (s.wallSeconds < 0) {
-            // Kernel times were not available (process already gone): fall back to the window the
-            // IDE reported, which also contains the console start-up/tear-down.
+            // Last resort: the window the IDE reported. It starts before the build step and ends
+            // with the console tear-down, so it is only ever used when the process was never seen.
             s.wallSeconds = (System.nanoTime() - c.eventStartNanos) / 1e9;
             s.kernelTimed = false;
         }
@@ -477,6 +530,7 @@ final class OiStats {
         if (s.cpuMillis >= 0) sb.append(" | CPU time: ").append(Oi.fixed(s.cpuMillis, 4)).append(" ms");
         if (s.peakBytes >= 0) sb.append(" | Peak memory: ").append(Oi.humanBytes(s.peakBytes));
         if (debugSession) sb.append(s.kernelTimed ? " [debug]" : " [debug session]");
+        else if (s.creationTimed) sb.append(" [no exit time]");
         else if (!s.kernelTimed) sb.append(" [approximate]");
         sb.append('\n');
         return sb.toString();
@@ -549,6 +603,30 @@ final class OiStats {
 
     // ---------------------------------------------------------------- helpers
 
+    /**
+     * Image name of the program the environment will launch. CLion's CMake-backed single-file
+     * configuration often cannot produce an executable path, so the source file's name with
+     * {@code .exe} is used instead: that is what CMake names the binary.
+     */
+    private static String exeNameOf(ExecutionEnvironment env) {
+        String exe = baseName(exePathOf(env));
+        if (exe != null && !exe.isEmpty()) return exe;
+        String source = baseName(sourceOf(env));
+        if (source == null || source.isEmpty()) return null;
+        int dot = source.lastIndexOf('.');
+        String stem = dot > 0 ? source.substring(0, dot) : source;
+        return stem.isEmpty() ? null : stem + ".exe";
+    }
+
+    private static String sourceOf(ExecutionEnvironment env) {
+        try {
+            RunProfile profile = env == null ? null : env.getRunProfile();
+            return profile == null ? null : Oi.getSourceFile(profile);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** Path of the executable a run configuration will launch, if CLion can tell us. */
     private static String exePathOf(ExecutionEnvironment env) {
         try {
@@ -595,11 +673,29 @@ final class OiStats {
     private static int pidOf(ProcessHandler handler) {
         try {
             Method m = Oi.method(handler.getClass(), "getProcess", 0);
-            if (m == null) return -1;
-            Object process = m.invoke(handler);
-            return process instanceof Process ? (int) ((Process) process).pid() : -1;
-        } catch (Throwable t) {
-            return -1;
+            if (m != null) {
+                Object process = m.invoke(handler);
+                if (process instanceof Process) return (int) ((Process) process).pid();
+            }
+        } catch (Throwable ignored) {
+            // fall through to the field scan
         }
+        // Newer platform builds keep the process in a private field instead.
+        for (Class<?> c = handler.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (!Process.class.isAssignableFrom(f.getType())) continue;
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(handler);
+                    if (v instanceof Process) {
+                        int pid = (int) ((Process) v).pid();
+                        if (pid > 0) return pid;
+                    }
+                } catch (Throwable ignored) {
+                    // try the next field
+                }
+            }
+        }
+        return -1;
     }
 }
