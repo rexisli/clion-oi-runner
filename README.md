@@ -158,6 +158,7 @@ jar cf oi-runner.jar -C out .
   理论上可能认错；定位成功后插件会把 pid 写进 `idea.log`（`OI Runner: timing pid ...`）以便核对。
 - 插件创建的是临时（temporary）运行配置，会随 CLion 的常规清理策略消失；重新点一次动作即可再建。
 - 试题集的编译器默认取 CLion 自带工具链（`<CLion 目录>/bin/mingw/bin/g++.exe`），找不到就退回 `PATH` 里的 `g++`；用的是其他工具链（MSVC 等）时请在 **Settings → Tools → OI Runner → Test-case compiler** 里写绝对路径。
+- 刚编译出来的 exe 第一次启动可能被 Defender 实时扫描拖慢 0.15~0.35 s，所以第 1 个案例如果判成 TLE，插件会自动再测一次，以第二次为准。
 - 判题输出是纯文本比较，不做浮点误差容忍（需要请自己 `printf` 控制位数）；交互题、Special Judge 概不支持。
 - 案例面板的输入/期望框是纯文本编辑器，不含代码补全；大案例（几万个 token）编辑会有轻微延迟。
 
