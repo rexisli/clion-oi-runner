@@ -2,7 +2,7 @@
     <id>oi.runner.clion</id>
     <name>OI Runner</name>
     <version>1.4.5</version>
-    <vendor>oi</vendor>
+    <vendor>rexisli</vendor>
 
     <description><![CDATA[
     Runs or debugs the C/C++ file you are looking at, using CLion's own single-file build, then
