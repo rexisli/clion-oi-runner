@@ -1,0 +1,12 @@
+v1.4.6/v1.4.7: build a tab on add; diff against the current expected text
+
+v1.4.6 — 点击 + 添加案例后页签空白：addTab() 先把案例注册进 tabOf 再添加页签，
+因为往空 JTabbedPane 里插入第一个页签会立刻选中它并触发选中回调，而此时页签
+还不在 map 里，三栏永远建不出来；addCase()/finishImport() 选中已选中的索引不会
+再发事件，因此再显式 activate() 一次兜底。
+
+v1.4.7 — WA 后跑成 AC 时红色错误标记不消失：CaseTab.expectedShown 只在页签首次
+构建时取过一次快照，之后修改「期望输出」不会更新它，重绘差异仍按旧期望比对，
+于是判定已是 AC，红行又按旧文本画了回来。现在编辑期望时同步快照并立即重算差异，
+每次运行前用当前期望刷新，先清空高亮再换文本，并在 applyDiff() 末尾补一次重绘，
+避免移除高亮后留下残影。

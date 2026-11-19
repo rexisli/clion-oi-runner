@@ -284,9 +284,11 @@ final class OiCasePanel implements Disposable {
 
     private void addTab(@NotNull OiCase c, int index) {
         // A tab costs one empty panel here; its three editors are built on first selection.
+        // Register it before adding: inserting the first tab selects it right away, and the
+        // selection listener has to find the case in order to build its panes.
         CaseTab tab = new CaseTab(c);
-        tabs.addTab(titleFor(c, index), UNKNOWN, tab.panel);
         tabOf.put(c, tab);
+        tabs.addTab(titleFor(c, index), UNKNOWN, tab.panel);
     }
 
     /**
@@ -338,6 +340,8 @@ final class OiCasePanel implements Disposable {
         OiCaseStore.getInstance(project).touch();
         addTab(c, set.cases.size() - 1);
         tabs.setSelectedIndex(set.cases.size() - 1);
+        // Selecting an already selected index fires no event, so build the tab explicitly.
+        activate(tabs.getSelectedIndex());
         statusLabel.setText("已添加 " + c.name);
         updateButtons();
     }
@@ -538,6 +542,7 @@ final class OiCasePanel implements Disposable {
         OiCaseStore.getInstance(project).touch();
         rebuildTabs();
         tabs.setSelectedIndex(set.cases.size() - imported.size());
+        activate(tabs.getSelectedIndex());
         int emptyInput = 0;
         for (OiCase c : imported) {
             if (c.input == null || c.input.isEmpty()) emptyInput++;
@@ -834,7 +839,10 @@ final class OiCasePanel implements Disposable {
         List<String> left = normalizeLines(expected);
         List<String> right = normalizeLines(actual);
         boolean[] matched = lcsMatches(left, right);
-        if (matched == null) return;
+        if (matched == null) {
+            area.repaint();
+            return;
+        }
         Highlighter.HighlightPainter painter = new DefaultHighlighter.DefaultHighlightPainter(
                 new JBColor(new Color(0x33E74C3C, true), new Color(0x55E74C3C, true)));
         Element root = area.getDocument().getDefaultRootElement();
@@ -850,6 +858,9 @@ final class OiCasePanel implements Disposable {
         } catch (BadLocationException ignored) {
             // The document shrank while painting; the next run repaints anyway.
         }
+        // Remove and repaint happen in separate passes here, and swing only damages the ranges it
+        // knows about; without this the previous run's red line could stay painted until a scroll.
+        area.repaint();
     }
 
     private static List<String> normalizeLines(String text) {
@@ -1052,7 +1063,11 @@ final class OiCasePanel implements Disposable {
             });
             onEdit(expected, () -> {
                 c.expected = expected.getText();
+                expectedShown = expected.getText();
                 OiCaseStore.getInstance(project).touch();
+                // Re-diff against the text as it is now: comparing with the copy taken when the tab
+                // was built kept the old red lines on screen even after the case passed.
+                if (verdict != null) applyDiff(actual, expectedShown, actualShown);
             });
             JSplitPane upper = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
                     pane("输入" + (inCut ? " · 已截断" : ""), scrolled(input)),
@@ -1074,6 +1089,8 @@ final class OiCasePanel implements Disposable {
         void setActual(String text) {
             actualShown = display(text);
             if (actual == null) return;
+            if (expected != null) expectedShown = expected.getText();
+            actual.getHighlighter().removeAllHighlights();
             actual.setText(actualShown);
             actual.setCaretPosition(0);
             applyDiff(actual, expectedShown, actualShown);
