@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>oi.runner.clion</id>
     <name>OI Runner</name>
-    <version>1.4.7</version>
+    <version>1.5.2</version>
     <vendor>rexisli</vendor>
 
     <description><![CDATA[
@@ -14,8 +14,9 @@
     <br/><br/>
     The <b>OI Cases</b> tool window keeps a list of test cases for the file you are looking at:
     input, expected output and the actual output of the last run, one tab per case, with the lines
-    that do not match painted red. The plugin compiles the file once and runs it once per case with
-    a time limit and a memory limit, then writes the verdict on each tab and rolls the run up as
+    that do not match painted red. The plugin compiles each file once per batch and runs cases in
+    parallel with time and memory limits. The Debug button uses the selected case as stdin in the
+    native debugger. The panel writes the verdict on each tab and rolls the run up as
     "AC 3 · WA 1". Test cases can be imported from a folder of 1.in/1.out pairs or from a .zip of
     them, or simply by dragging that folder or archive onto the panel; cases are stored in the
     project's .idea directory, so a whole problem folder can be shared as-is.

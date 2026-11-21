@@ -1,0 +1,17 @@
+v1.5.2: parallel case runs, case debugger, autosave before actions
+
+- OI Cases: compile once per batch, then run cases in parallel
+  (up to 2 compilers, up to 4 case workers) with an isolated
+  working directory per case; verdicts still arrive in order.
+- OI Cases: Debug button runs the selected case through CLion's
+  native debugger with the case input redirected to stdin.
+- OI Cases: buttons and the time / memory limits now sit on
+  separate rows, so they fit a narrow tool window.
+- Save the editor before every run, debug, add, remove, clear and
+  import, using a write-intent read action (fixes the
+  "Access is allowed from write thread only" error on import).
+- Judge: line-by-line comparison by position, per-case output
+  directories, and compile logs captured to a temp file.
+- Import: skip __MACOSX/ and ._* metadata from macOS zips.
+- Rebuild the tab strip per file so no stale tabs or scroll
+  offsets leak across files, and show a hint for empty case sets.

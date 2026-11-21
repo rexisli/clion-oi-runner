@@ -10,6 +10,8 @@ import com.intellij.execution.configurations.ConfigurationType;
 import com.intellij.execution.configurations.ConfigurationTypeUtil;
 import com.intellij.notification.NotificationGroupManager;
 import com.intellij.notification.NotificationType;
+import com.intellij.openapi.application.WriteIntentReadAction;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.project.Project;
@@ -68,6 +70,18 @@ public final class Oi {
             default:
                 return false;
         }
+    }
+
+    /** External compilers read from disk. Save edited headers as well as the source file. */
+    static boolean saveSource(Project project, VirtualFile file) {
+        if (!file.isValid() || project.isDisposed()) return false;
+        FileDocumentManager documents = FileDocumentManager.getInstance();
+        // Swing button callbacks run on the EDT without an implicit write-intent lock.
+        WriteIntentReadAction.run(documents::saveAllDocuments);
+        Document source = documents.getCachedDocument(file);
+        if (source == null || !documents.isDocumentUnsaved(source)) return true;
+        notify(project, "无法保存 " + file.getName(), "请先保存源码，再重新运行或调试。");
+        return false;
     }
 
     // -------------------------------------------------------- configuration

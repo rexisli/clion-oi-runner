@@ -32,6 +32,7 @@ public abstract class OiFileAction extends DumbAwareAction {
                     "Put the caret in a C or C++ source file, then run this action again.");
             return;
         }
+        if (!Oi.saveSource(project, file)) return;
         RunnerAndConfigurationSettings settings = Oi.settingsFor(project, file, build());
         if (settings == null) return;
         Oi.execute(project, settings, executorId());
