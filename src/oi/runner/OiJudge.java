@@ -1,12 +1,9 @@
 package oi.runner;
 
 import com.intellij.openapi.application.PathManager;
-import com.intellij.openapi.project.Project;
-import com.intellij.openapi.vfs.VirtualFile;
-import org.jetbrains.annotations.Nullable;
+import com.intellij.openapi.util.io.FileUtil;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,38 +40,33 @@ final class OiJudge {
     private OiJudge() {
     }
 
-    static Build compile(@Nullable Project project, VirtualFile file) {
+    static Build compile(String source, String stem, String compiler, String options) {
         Build b = new Build();
-        Path dir = buildDir(file);
-        String stem = file.getNameWithoutExtension();
-        Path exe = dir.resolve(stem + (OiKernel.WINDOWS ? ".exe" : ""));
-        String compiler = compilerPath();
-        OiSettings settings = OiSettings.getInstance();
-        String options = settings == null ? OiSettings.DEFAULT_JUDGE : settings.getJudgeOptions();
 
         List<String> command = new ArrayList<>();
         command.add(compiler);
         command.addAll(splitOptions(options));
-        command.add("-o");
-        command.add(exe.toString());
-        command.add(file.getPath());
-
-        long started = System.nanoTime();
+        Process p = null;
         try {
+            b.dir = Files.createTempDirectory("oi-runner-build-");
+            Path exe = b.dir.resolve(stem + (OiKernel.WINDOWS ? ".exe" : ""));
+            Path log = b.dir.resolve("compile.log");
+            command.add("-o");
+            command.add(exe.toString());
+            command.add(source);
             ProcessBuilder pb = new ProcessBuilder(command);
-            pb.directory(dir.toFile());
+            pb.directory(b.dir.toFile());
             pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String output;
-            try (InputStream in = p.getInputStream()) {
-                output = decode(in.readAllBytes());
-            }
+            pb.redirectOutput(log.toFile());
+            long started = System.nanoTime();
+            p = pb.start();
             if (!p.waitFor(300, TimeUnit.SECONDS)) {
-                killTree(p);
-                b.error = "编译超时（300 s）\n" + tail(output);
+                stop(p);
+                b.error = "编译超时（300 s）\n" + tail(readText(log));
                 return b;
             }
             b.seconds = (System.nanoTime() - started) / 1e9;
+            String output = readText(log);
             b.log = output;
             if (p.exitValue() != 0) {
                 b.error = "编译失败（exit " + p.exitValue() + "）\n\n" + tail(output);
@@ -85,42 +77,47 @@ final class OiJudge {
                 return b;
             }
             b.exe = exe;
-            b.dir = dir;
-        } catch (Throwable t) {
-            b.error = "无法调用编译器 " + compiler + "\n" + t;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            b.error = "编译被中断";
+        } catch (IOException | RuntimeException e) {
+            b.error = "无法调用编译器 " + compiler + "\n" + e;
+        } finally {
+            stop(p);
+            if (b.exe == null) cleanup(b);
         }
         return b;
     }
 
-    static CaseResult runCase(Build build, OiCase c, int timeLimitMillis, int memoryLimitMb) {
+    static CaseResult runCase(Build build, String input, String expected, int timeLimitMillis, int memoryLimitMb) {
         CaseResult r = new CaseResult();
-        Path in = build.dir.resolve("case.in");
-        Path out = build.dir.resolve("case.out");
+        Path dir = null;
+        Process p = null;
+        OiKernel.Probe probe = null;
         try {
-            Files.writeString(in, c.input == null ? "" : c.input, StandardCharsets.UTF_8);
-            Files.deleteIfExists(out);
+            // Isolate redirected streams and any relative files opened by the program itself.
+            dir = Files.createTempDirectory(build.dir, "case-");
+            Path in = dir.resolve("case.in");
+            Path out = dir.resolve("case.out");
+            Files.writeString(in, input == null ? "" : input, StandardCharsets.UTF_8);
 
             ProcessBuilder pb = new ProcessBuilder(build.exe.toString());
-            pb.directory(build.dir.toFile());
+            pb.directory(dir.toFile());
             pb.redirectInput(in.toFile());
             pb.redirectOutput(out.toFile());
             pb.redirectErrorStream(true);
 
             long started = System.nanoTime();
-            Process p = pb.start();
-            OiKernel.Probe probe = OiKernel.open(p.pid());
+            p = pb.start();
+            probe = OiKernel.open(p.pid());
             boolean finished = p.waitFor(timeLimitMillis + 250L, TimeUnit.MILLISECONDS);
-            if (!finished) {
-                killTree(p);
-                p.waitFor(2, TimeUnit.SECONDS);
-            }
-            r.actual = readText(out);
+            if (!finished) stop(p);
             double wall = probe.wallSeconds();
             if (wall < 0) wall = (System.nanoTime() - started) / 1e9;
             r.wallSeconds = wall;
             r.cpuMillis = probe.cpuMillis();
             r.peakBytes = probe.peakBytes();
-            probe.close();
+            r.actual = readText(out);
 
             if (!finished) {
                 r.verdict = Verdict.TLE;
@@ -138,13 +135,15 @@ final class OiJudge {
                 r.verdict = Verdict.TLE;
                 return r;
             }
-            r.verdict = sameOutput(c.expected, r.actual) ? Verdict.AC : Verdict.WA;
+            r.verdict = sameOutput(expected, r.actual) ? Verdict.AC : Verdict.WA;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            r.verdict = Verdict.RE;
-        } catch (Throwable t) {
-            r.verdict = Verdict.RE;
-            r.actual = "运行失败：" + t;
+        } catch (IOException | RuntimeException e) {
+            r.actual = "运行失败：" + e;
+        } finally {
+            stop(p);
+            if (probe != null) probe.close();
+            if (dir != null) FileUtil.delete(dir.toFile());
         }
         return r;
     }
@@ -183,25 +182,23 @@ final class OiJudge {
         return out;
     }
 
-    private static Path buildDir(VirtualFile file) {
-        String key = Integer.toHexString(file.getPath().hashCode());
-        Path dir = Paths.get(System.getProperty("java.io.tmpdir"), "oi-runner",
-                file.getNameWithoutExtension() + "-" + key);
-        try {
-            Files.createDirectories(dir);
-        } catch (IOException ignored) {
-            // the compiler invocation will report the real problem
-        }
-        return dir;
+    static void cleanup(Build build) {
+        if (build.dir != null) FileUtil.delete(build.dir.toFile());
     }
 
-    private static void killTree(Process p) {
+    private static void stop(Process p) {
+        if (p == null || !p.isAlive()) return;
         try {
             p.descendants().forEach(ProcessHandle::destroyForcibly);
         } catch (Throwable ignored) {
             // best effort
         }
         p.destroyForcibly();
+        try {
+            p.waitFor(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static String readText(Path file) {
@@ -224,20 +221,45 @@ final class OiJudge {
         }
     }
 
-    /** Judge comparison: whitespace is insignificant, trailing blank lines are noise. */
+    /**
+     * Judge comparison: line by line, in order. Only trailing whitespace inside a line and trailing
+     * blank lines at the end are ignored — which number sits on which line is part of the answer, so
+     * comparing token by token (where "1 2" and "12" or "1\n2 3" and "1 2\n3" all matched) is wrong.
+     */
     static boolean sameOutput(String expected, String actual) {
-        List<String> a = tokens(expected);
-        List<String> b = tokens(actual);
-        return a.equals(b);
+        return lines(expected).equals(lines(actual));
     }
 
-    static List<String> tokens(String text) {
+    /**
+     * Answer text as lines: CRLF/CR folded to LF, trailing whitespace trimmed per line, trailing blank
+     * lines at the end dropped. Shared with the panel so judging and the on-screen diff agree.
+     */
+    static List<String> lines(String text) {
         List<String> out = new ArrayList<>();
         if (text == null) return out;
-        for (String token : text.split("\\s+")) {
-            if (!token.isEmpty()) out.add(token);
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
+        for (String line : normalized.split("\n", -1)) {
+            int end = line.length();
+            while (end > 0 && Character.isWhitespace(line.charAt(end - 1))) end--;
+            out.add(line.substring(0, end));
         }
+        while (!out.isEmpty() && out.get(out.size() - 1).isEmpty()) out.remove(out.size() - 1);
         return out;
+    }
+
+    /** 1-based number of the first line that differs, or 0 when the two answers are line-for-line equal. */
+    static int firstMismatchLine(String expected, String actual) {
+        return firstMismatchLine(lines(expected), lines(actual));
+    }
+
+    static int firstMismatchLine(List<String> expected, List<String> actual) {
+        int total = Math.max(expected.size(), actual.size());
+        for (int i = 0; i < total; i++) {
+            String a = i < expected.size() ? expected.get(i) : null;
+            String b = i < actual.size() ? actual.get(i) : null;
+            if (a == null ? b != null : !a.equals(b)) return i + 1;
+        }
+        return 0;
     }
 
     private static String tail(String text) {
