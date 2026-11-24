@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
  */
 final class OiJudge {
 
-    enum Verdict { AC, WA, TLE, MLE, RE, CE }
+    enum Verdict { AC, WA, TLE, MLE, RE, CE, JE }
 
     static final class Build {
         Path exe;
@@ -32,6 +32,9 @@ final class OiJudge {
     static final class CaseResult {
         Verdict verdict = Verdict.RE;
         String actual = "";
+        boolean specialJudge;
+        String checkerMessage = "";
+        int mismatchLine;
         double wallSeconds = -1;
         double cpuMillis = -1;
         long peakBytes = -1;
@@ -90,7 +93,13 @@ final class OiJudge {
     }
 
     static CaseResult runCase(Build build, String input, String expected, int timeLimitMillis, int memoryLimitMb) {
+        return runCase(build, input, expected, timeLimitMillis, memoryLimitMb, null);
+    }
+
+    static CaseResult runCase(Build build, String input, String expected, int timeLimitMillis, int memoryLimitMb,
+                              String checkerPath) {
         CaseResult r = new CaseResult();
+        r.specialJudge = checkerPath != null && !checkerPath.isBlank();
         Path dir = null;
         Process p = null;
         OiKernel.Probe probe = null;
@@ -105,7 +114,10 @@ final class OiJudge {
             pb.directory(dir.toFile());
             pb.redirectInput(in.toFile());
             pb.redirectOutput(out.toFile());
-            pb.redirectErrorStream(true);
+            // The checker must receive exactly the program's stdout, including its original bytes.
+            Path err = dir.resolve("case.err");
+            if (r.specialJudge) pb.redirectError(err.toFile());
+            else pb.redirectErrorStream(true);
 
             long started = System.nanoTime();
             p = pb.start();
@@ -128,6 +140,7 @@ final class OiJudge {
                 return r;
             }
             if (p.exitValue() != 0) {
+                if (r.specialJudge) r.actual += readText(err);
                 r.verdict = Verdict.RE;
                 return r;
             }
@@ -135,7 +148,12 @@ final class OiJudge {
                 r.verdict = Verdict.TLE;
                 return r;
             }
-            r.verdict = sameOutput(expected, r.actual) ? Verdict.AC : Verdict.WA;
+            if (r.specialJudge) {
+                OiChecker.check(checkerPath, in, out, expected, r);
+                return r;
+            }
+            r.mismatchLine = firstMismatchLine(expected, r.actual);
+            r.verdict = r.mismatchLine == 0 ? Verdict.AC : Verdict.WA;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException e) {
@@ -186,7 +204,7 @@ final class OiJudge {
         if (build.dir != null) FileUtil.delete(build.dir.toFile());
     }
 
-    private static void stop(Process p) {
+    static void stop(Process p) {
         if (p == null || !p.isAlive()) return;
         try {
             p.descendants().forEach(ProcessHandle::destroyForcibly);
@@ -211,7 +229,7 @@ final class OiJudge {
     }
 
     /** UTF-8 first; if the bytes are not valid UTF-8 (MinGW on a Chinese Windows prints GBK), decode as GBK. */
-    private static String decode(byte[] bytes) {
+    static String decode(byte[] bytes) {
         String utf8 = new String(bytes, StandardCharsets.UTF_8);
         if (utf8.indexOf('\uFFFD') < 0) return utf8;
         try {

@@ -18,7 +18,9 @@ final class OiCaseBatch {
     private static final Executor CASES = AppExecutorUtil.createBoundedApplicationPoolExecutor(
             "OI Runner cases", Math.max(1, Math.min(4, CPUS / 2)));
 
-    record Input(String stdin, String expected) {}
+    record Input(String stdin, String expected, String checkerPath) {
+        Input(String stdin, String expected) { this(stdin, expected, null); }
+    }
 
     private OiCaseBatch() {}
 
@@ -53,10 +55,10 @@ final class OiCaseBatch {
                 CompletableFuture.runAsync(() -> {
                     if (project.isDisposed()) return;
                     Input input = inputs.get(index);
-                    OiJudge.CaseResult result = OiJudge.runCase(build, input.stdin(), input.expected(), timeLimit, memoryLimit);
+                    OiJudge.CaseResult result = OiJudge.runCase(build, input.stdin(), input.expected(), timeLimit, memoryLimit, input.checkerPath());
                     if (index == 0 && result.verdict == OiJudge.Verdict.TLE && !project.isDisposed()) {
                         // A real-time antivirus scan of a fresh executable can cause a false TLE.
-                        result = OiJudge.runCase(build, input.stdin(), input.expected(), timeLimit, memoryLimit);
+                        result = OiJudge.runCase(build, input.stdin(), input.expected(), timeLimit, memoryLimit, input.checkerPath());
                     }
                     onCase.accept(index, result);
                 }, CASES)).toArray(CompletableFuture<?>[]::new);

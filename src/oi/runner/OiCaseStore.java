@@ -22,6 +22,8 @@ public final class OiCaseStore implements PersistentStateComponentWithModificati
 
     /** The cases of one source file. */
     public static final class CaseSet {
+        /** Empty in old projects and whenever ordinary comparison is selected. */
+        public String checkerPath = "";
         public List<OiCase> cases = new ArrayList<>();
     }
 
@@ -72,6 +74,7 @@ public final class OiCaseStore implements PersistentStateComponentWithModificati
             state.sets.put(key, set);
         }
         if (set.cases == null) set.cases = new ArrayList<>();
+        if (set.checkerPath == null) set.checkerPath = "";
         return set;
     }
 

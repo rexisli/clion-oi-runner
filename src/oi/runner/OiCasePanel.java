@@ -23,8 +23,6 @@ import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import javax.swing.Icon;
-import javax.swing.ImageIcon;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.JButton;
 import javax.swing.JComponent;
@@ -55,10 +53,6 @@ import java.awt.dnd.DropTargetDragEvent;
 import java.awt.dnd.DropTargetDropEvent;
 import java.awt.dnd.DropTargetEvent;
 import java.awt.Font;
-import java.awt.FontMetrics;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
-import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -88,9 +82,6 @@ import java.util.zip.ZipFile;
  */
 final class OiCasePanel implements Disposable {
 
-    private static final Icon UNKNOWN = dot(new Color(0x9AA0A6));
-    private static final Icon PASSED = dot(new Color(0x27AE60));
-    private static final Icon FAILED = dot(new Color(0xE74C3C));
 
     private final Project project;
     private final JPanel root = new JPanel(new BorderLayout());
@@ -110,6 +101,7 @@ final class OiCasePanel implements Disposable {
     private final JButton importButton = smallButton("I", "导入案例，也可以直接拖进来");
     private final JButton runAllButton = smallButton("A", "运行全部案例");
     private final JButton runOneButton = smallButton("T", "运行当前案例");
+    private final JButton checkerButton = toolbarButton("SPJ", "选择本题的 checker", 40);
     private final JButton debugButton = toolbarButton("Debug", "用当前案例的输入启动调试", 54);
     private java.awt.dnd.DropTarget dropTarget;
     private final MessageBusConnection bus;
@@ -151,6 +143,7 @@ final class OiCasePanel implements Disposable {
         runAllButton.addActionListener(e -> run(false));
         runOneButton.addActionListener(e -> run(true));
         debugButton.addActionListener(e -> debugCase());
+        checkerButton.addActionListener(e -> configureChecker());
         importButton.addActionListener(e -> importCases());
         timeSpinner.addChangeListener(e ->
                 OiCaseStore.getInstance(project).setTimeLimitMillis((Integer) timeSpinner.getValue()));
@@ -185,7 +178,10 @@ final class OiCasePanel implements Disposable {
     private JComponent buildHeader() {
         JPanel header = new JPanel(new BorderLayout());
         fileLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 6, 0, 4));
-        header.add(fileLabel, BorderLayout.NORTH);
+        JPanel sourceRow = new JPanel(new BorderLayout());
+        sourceRow.add(fileLabel, BorderLayout.CENTER);
+        sourceRow.add(checkerButton, BorderLayout.EAST);
+        header.add(sourceRow, BorderLayout.NORTH);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 1));
         for (JButton button : new JButton[]{addButton, removeButton, clearButton, importButton, runAllButton, runOneButton, debugButton}) {
@@ -231,9 +227,48 @@ final class OiCasePanel implements Disposable {
     private void showFile(@NotNull VirtualFile selected) {
         if (file != null && file.getPath().equals(selected.getPath())) return;
         file = selected;
-        fileLabel.setText("  " + selected.getName());
+        refreshCheckerLabel();
         statusLabel.setText(runMessages.getOrDefault(selected, " "));
         rebuildTabs();
+    }
+
+    private void refreshCheckerLabel() {
+        String path = OiCaseStore.getInstance(project).setFor(file.getPath()).checkerPath;
+        fileLabel.setText("  " + file.getName() + (path.isEmpty() ? "" : " · SPJ · " + new File(path).getName()));
+        checkerButton.setToolTipText(path.isEmpty() ? "普通比对 · 点击选择本题的 checker" : "本题 checker：" + path);
+    }
+
+    private void configureChecker() {
+        VirtualFile target = file;
+        if (target == null || isRunning() || indexing) return;
+        OiCaseStore store = OiCaseStore.getInstance(project);
+        OiCaseStore.CaseSet set = store.setFor(target.getPath());
+        String path = set.checkerPath;
+        boolean clear = false;
+        if (!path.isEmpty()) {
+            int choice = Messages.showDialog(project, "本题 checker：" + path, "Special Judge",
+                    new String[]{"更换 checker…", "清除并恢复普通比对", "取消"}, 0, Messages.getQuestionIcon());
+            if (choice != 0 && choice != 1) return;
+            clear = choice == 1;
+        }
+        if (clear) {
+            path = "";
+        } else {
+            JFileChooser chooser = new JFileChooser(new File(path.isEmpty() ? target.getPath() : path).getParentFile());
+            chooser.setDialogTitle("选择本题的 checker 可执行文件");
+            if (chooser.showOpenDialog(root) != JFileChooser.APPROVE_OPTION) return;
+            path = chooser.getSelectedFile().getAbsolutePath();
+        }
+        if (!target.equals(file) || isRunning() || path.equals(set.checkerPath)) return;
+        set.checkerPath = path;
+        store.touch();
+        // Verdicts and line highlights from the old checker no longer describe these cases.
+        for (OiCase c : set.cases) results.remove(c);
+        int selected = tabs.getSelectedIndex();
+        refreshCheckerLabel();
+        rebuildTabs();
+        if (selected >= 0 && selected < tabs.getTabCount()) tabs.setSelectedIndex(selected);
+        setRunMessage(target, path.isEmpty() ? "已恢复普通比对" : "已启用 SPJ");
     }
 
     /** A new scroll viewport starts at the leading edge for each file. */
@@ -318,7 +353,8 @@ final class OiCasePanel implements Disposable {
         // selection listener has to find the case in order to build its panes.
         CaseTab tab = new CaseTab(c);
         tabOf.put(c, tab);
-        tabs.addTab(titleFor(c, index), UNKNOWN, tab.panel);
+        String title = titleFor(c, index);
+        tabs.addTab(title, tab.panel);
         OiJudge.CaseResult previous = results.get(c);
         if (previous != null) showResult(tab, previous);
     }
@@ -719,18 +755,22 @@ final class OiCasePanel implements Disposable {
      * Windows judges is usually CRLF, so fold it here once.
      */
     /** Editor panes only ever hold this much text; the model keeps the full data for judging. */
-    private static final int MAX_DISPLAY_CHARS = 120_000;
+    private static final int MAX_DISPLAY_CHARS = 16_384;
+    private static final int MAX_DISPLAY_ROWS = 256;
 
-    private static int textLength(String text) {
-        return text == null ? 0 : text.length();
-    }
-
-    /** The first {@code MAX_DISPLAY_CHARS} characters of {@code text}, with a note when it was cut. */
-    private static String display(String text) {
+    /** Return the original object for an uncut preview so editability never depends on note length. */
+    static String display(String text) {
         if (text == null) return "";
-        if (text.length() <= MAX_DISPLAY_CHARS) return text;
-        int cut = text.lastIndexOf('\n', MAX_DISPLAY_CHARS);
-        if (cut <= 0) cut = MAX_DISPLAY_CHARS;
+        int cut = Math.min(text.length(), MAX_DISPLAY_CHARS);
+        int rows = 0;
+        for (int i = 0; i < cut; i++) {
+            if (text.charAt(i) == '\n' && ++rows == MAX_DISPLAY_ROWS && i + 1 < text.length()) {
+                cut = i;
+                break;
+            }
+        }
+        if (cut == text.length()) return text;
+        if (cut > 0 && Character.isHighSurrogate(text.charAt(cut - 1))) cut--;
         return text.substring(0, cut) + "\n…… 其余 " + (text.length() - cut) + " 个字符未显示";
     }
 
@@ -809,15 +849,19 @@ final class OiCasePanel implements Disposable {
         if (!Oi.saveSource(project, target)) return;
         int timeLimit = (Integer) timeSpinner.getValue();
         int memoryLimit = (Integer) memorySpinner.getValue();
+        String checkerPath = OiCaseStore.getInstance(project).setFor(target.getPath()).checkerPath;
         List<OiCaseBatch.Input> inputs = chosen.stream()
-                .map(c -> new OiCaseBatch.Input(c.input, c.expected)).toList();
+                .map(c -> new OiCaseBatch.Input(c.input, c.expected, checkerPath)).toList();
 
         RunState run = new RunState(target, chosen);
         activeRuns.put(target, run);
         updateButtons();
         setRunMessage(target, "编译中…");
         OiCaseBatch.start(project, target, inputs, timeLimit, memoryLimit,
-                (index, result) -> onEdt(() -> run.accept(index, result)),
+                (index, result) -> {
+                    result.actual = normalizeSeparators(result.actual);
+                    onEdt(() -> run.accept(index, result));
+                },
                 (seconds, failure) -> onEdt(() -> run.finish(seconds, failure)));
     }
 
@@ -834,7 +878,7 @@ final class OiCasePanel implements Disposable {
 
         private void accept(int index, OiJudge.CaseResult result) {
             OiCase c = chosen.get(index);
-            c.actual = normalizeSeparators(result.actual);
+            c.actual = result.actual;
             result.actual = ""; // Only keep the verdict and statistics in the transient result cache.
             OiCaseStore.getInstance(project).touch();
             results.put(c, result);
@@ -864,7 +908,8 @@ final class OiCasePanel implements Disposable {
                 return;
             }
             OiCase single = chosen.size() == 1 ? chosen.getFirst() : null;
-            int badLine = single == null ? 0 : mismatchLine(single, results.get(single));
+            OiJudge.CaseResult singleResult = single == null ? null : results.get(single);
+            int badLine = singleResult == null || singleResult.specialJudge ? 0 : singleResult.mismatchLine;
             setRunMessage(target, summary(tally) + " · 共 " + chosen.size() + " 个案例 · 编译 "
                     + Oi.fixed(seconds, 2) + " s" + (badLine > 0 ? " · 第 " + badLine + " 行不匹配" : ""));
         }
@@ -875,25 +920,25 @@ final class OiCasePanel implements Disposable {
         if (target.equals(file)) statusLabel.setText(message);
     }
 
-    private static int mismatchLine(OiCase c, OiJudge.CaseResult result) {
-        return result != null && result.verdict == OiJudge.Verdict.WA
-                ? OiJudge.firstMismatchLine(c.expected, c.actual) : 0;
-    }
 
     private void showResult(CaseTab tab, OiJudge.CaseResult result) {
-        tab.verdict = result.verdict;
-        int badLine = mismatchLine(tab.c, result);
+        tab.result = result;
+        int badLine = result.specialJudge ? 0 : result.mismatchLine;
         int index = tabs.indexOfComponent(tab.panel);
         if (index >= 0) {
-            tabs.setIconAt(index, iconFor(result.verdict));
+            showVerdictTitle(tabs, index, titleFor(tab.c, index), result.verdict);
             tabs.setToolTipTextAt(index, tooltip(result, badLine));
         }
-        if (tab.built && result.verdict != OiJudge.Verdict.CE) tab.setActual(tab.c.actual);
+        if (tab.built) {
+            tab.refreshDiagnostic();
+            tab.setActual(tab.c.actual);
+        }
     }
 
     private void updateButtons() {
         boolean ready = file != null && !isRunning() && !indexing;
         boolean hasCase = tabs.getSelectedIndex() >= 0;
+        checkerButton.setEnabled(ready && !importing);
         addButton.setEnabled(ready);
         removeButton.setEnabled(ready && hasCase);
         clearButton.setEnabled(ready && hasCase);
@@ -906,7 +951,7 @@ final class OiCasePanel implements Disposable {
     // ---------------------------------------------------------------- diffing
 
     /** Painted rows are capped: thousands of highlights cost more than they explain. */
-    private static final int MAX_DIFF_LINES = 2000;
+    private static final int MAX_DIFF_LINES = 128;
 
     /**
      * Marks the rows that differ, line by line: row i of the expected pane is painted when it differs
@@ -951,38 +996,6 @@ final class OiCasePanel implements Disposable {
 
     // ---------------------------------------------------------------- helpers
 
-    /**
-     * Verdict icon: the coloured dot plus the short verdict, painted into one image. Text inside
-     * the icon survives the tab strip's caption clipping, which is what ate "AC" before.
-     */
-    private static Icon iconFor(@Nullable OiJudge.Verdict verdict) {
-        if (verdict == null) return UNKNOWN;
-        boolean passed = verdict == OiJudge.Verdict.AC;
-        Color color = passed ? PASS_COLOR : FAIL_COLOR;
-        String text = shortLabel(verdict);
-        Font font = new Font(Font.SANS_SERIF, Font.BOLD, JBUI.scale(10));
-        int dot = JBUI.scale(8);
-        int gap = JBUI.scale(3);
-        int pad = JBUI.scale(1);
-        BufferedImage probe = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D measure = probe.createGraphics();
-        measure.setFont(font);
-        FontMetrics metrics = measure.getFontMetrics();
-        measure.dispose();
-        int width = pad + dot + gap + metrics.stringWidth(text) + pad;
-        int height = Math.max(JBUI.scale(14), metrics.getHeight());
-        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = image.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-        g.setColor(color);
-        g.fillOval(pad, (height - dot) / 2, dot, dot);
-        g.setFont(font);
-        g.drawString(text, pad + dot + gap, (height - metrics.getHeight()) / 2 + metrics.getAscent());
-        g.dispose();
-        return new ImageIcon(image);
-    }
-
     private static String tooltip(OiJudge.CaseResult result, int badLine) {
         StringBuilder sb = new StringBuilder(label(result.verdict));
         if (badLine > 0) sb.append(" · 第 ").append(badLine).append(" 行不匹配");
@@ -992,18 +1005,16 @@ final class OiCasePanel implements Disposable {
         return sb.toString();
     }
 
-    /**
-     * Tab caption is only the case name: the verdict rides on the icon, because a caption long
-     * enough to hold both got clipped to "C1 …" while the tab kept the width of the full text.
-     */
     private static String titleFor(OiCase c, int index) {
         String base = c.name == null ? "" : c.name.trim();
         if (base.isEmpty()) base = "案例 " + (index + 1);
         return base.length() > 16 ? base.substring(0, 15) + "…" : base;
     }
 
-    private static final Color PASS_COLOR = new Color(0x27AE60);
-    private static final Color FAIL_COLOR = new Color(0xE74C3C);
+    static void showVerdictTitle(JTabbedPane tabs, int index, String title, OiJudge.Verdict verdict) {
+        tabs.setTitleAt(index, title + " " + shortLabel(verdict));
+        tabs.setForegroundAt(index, new Color(verdict == OiJudge.Verdict.AC ? 0x27AE60 : 0xE74C3C));
+    }
 
     private static String shortLabel(OiJudge.Verdict verdict) {
         switch (verdict) {
@@ -1011,6 +1022,7 @@ final class OiCasePanel implements Disposable {
             case WA: return "WA";
             case TLE: return "TLE";
             case MLE: return "MLE";
+            case JE: return "JE";
             case CE: return "CE";
             default: return "RE";
         }
@@ -1025,7 +1037,7 @@ final class OiCasePanel implements Disposable {
         StringBuilder sb = new StringBuilder("AC ").append(passed);
         for (OiJudge.Verdict verdict : new OiJudge.Verdict[]{
                 OiJudge.Verdict.WA, OiJudge.Verdict.TLE, OiJudge.Verdict.MLE,
-                OiJudge.Verdict.RE, OiJudge.Verdict.CE}) {
+                OiJudge.Verdict.RE, OiJudge.Verdict.CE, OiJudge.Verdict.JE}) {
             int count = tally.getOrDefault(verdict, 0);
             if (count > 0) sb.append(" · ").append(shortLabel(verdict)).append(' ').append(count);
         }
@@ -1039,19 +1051,10 @@ final class OiCasePanel implements Disposable {
             case WA: return "答案错误";
             case TLE: return "超时";
             case MLE: return "超内存";
+            case JE: return "判题器错误";
             case CE: return "编译失败";
             default: return "运行错误";
         }
-    }
-
-    private static Icon dot(Color color) {
-        BufferedImage image = new BufferedImage(12, 12, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = image.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setColor(color);
-        g.fillOval(1, 1, 10, 10);
-        g.dispose();
-        return new ImageIcon(image);
     }
 
     private void onEdt(Runnable action) {
@@ -1075,7 +1078,9 @@ final class OiCasePanel implements Disposable {
         JTextArea input;
         JTextArea expected;
         JTextArea actual;
-        OiJudge.Verdict verdict;
+        OiJudge.CaseResult result;
+        JTextArea diagnostic;
+        JComponent diagnosticPane;
         boolean built;
         String expectedShown = "";
         String actualShown = "";
@@ -1090,9 +1095,9 @@ final class OiCasePanel implements Disposable {
             if (built) return;
             built = true;
             String inText = display(c.input);
-            boolean inCut = inText.length() < textLength(c.input);
+            boolean inCut = c.input != null && inText != c.input;
             String expText = display(c.expected);
-            boolean expCut = expText.length() < textLength(c.expected);
+            boolean expCut = c.expected != null && expText != c.expected;
             expectedShown = expText;
             actualShown = display(c.actual);
             input = textArea(inText, !inCut);
@@ -1110,8 +1115,8 @@ final class OiCasePanel implements Disposable {
                 // was built kept the old red lines on screen even after the case passed. Deferred,
                 // because this runs inside the expected document's own change notification and the
                 // diff paints that very document.
-                if (verdict != null) {
-                    SwingUtilities.invokeLater(() -> applyDiff(expected, actual, expectedShown, actualShown));
+                if (shouldDiff()) {
+                    SwingUtilities.invokeLater(this::refreshDiff);
                 }
             });
             JSplitPane upper = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
@@ -1119,15 +1124,37 @@ final class OiCasePanel implements Disposable {
                     pane("期望输出" + (expCut ? " · 已截断" : ""), scrolled(expected)));
             upper.setResizeWeight(0.5);
             JSplitPane all = new JSplitPane(JSplitPane.VERTICAL_SPLIT, upper,
-                    pane("实际输出" + (actualShown.length() < textLength(c.actual) ? " · 已截断" : ""),
+                    pane("实际输出",
                             scrolled(actual)));
             all.setResizeWeight(0.5);
             all.setBorder(null);
             body.removeAll();
             body.add(all, BorderLayout.CENTER);
+            diagnostic = textArea("", false);
+            diagnostic.setRows(2);
+            diagnostic.setLineWrap(true);
+            JBScrollPane diagnosticScroll = new JBScrollPane(diagnostic);
+            diagnosticPane = pane("Checker 诊断", diagnosticScroll);
+            body.add(diagnosticPane, BorderLayout.SOUTH);
+            refreshDiagnostic();
             body.revalidate();
             body.repaint();
-            if (verdict != null) applyDiff(expected, actual, expectedShown, actualShown);
+            refreshDiff();
+        }
+
+        private void refreshDiagnostic() {
+            String message = result == null ? null : result.checkerMessage;
+            diagnostic.setText(message);
+            diagnostic.setCaretPosition(0);
+            diagnosticPane.setVisible(message != null && !message.isBlank());
+        }
+
+        private boolean shouldDiff() {
+            return built && result != null && !result.specialJudge && result.verdict != OiJudge.Verdict.CE;
+        }
+
+        private void refreshDiff() {
+            if (shouldDiff()) applyDiff(expected, actual, expectedShown, actualShown);
         }
 
         /** Refreshes the read-only actual pane; large output is cut so the pane stays cheap. */
@@ -1135,10 +1162,11 @@ final class OiCasePanel implements Disposable {
             actualShown = display(text);
             if (actual == null) return;
             if (expected != null) expectedShown = expected.getText();
+            expected.getHighlighter().removeAllHighlights();
             actual.getHighlighter().removeAllHighlights();
             actual.setText(actualShown);
             actual.setCaretPosition(0);
-            applyDiff(expected, actual, expectedShown, actualShown);
+            refreshDiff();
         }
 
         /** Frees the three panes of a tab the user left, keeping its model data. */
@@ -1151,6 +1179,8 @@ final class OiCasePanel implements Disposable {
             input = null;
             expected = null;
             actual = null;
+            diagnostic = null;
+            diagnosticPane = null;
             expectedShown = "";
             actualShown = "";
         }
